@@ -15,9 +15,11 @@
     <h2>Upload a certificate of conformance / MTR</h2>
     <p class="muted">
       MVP only supports one document type (per the pinned document-scope
-      decision). PDFs are read via their embedded text layer, not image
-      OCR — a scanned/photographed document won't extract cleanly (see
-      README). Plain text files also work, for the demo samples.
+      decision). A certificate can cover one heat or several (a
+      consolidated multi-heat certificate) — each heat is reviewed and
+      issued as its own credential. PDFs are read via their embedded text
+      layer, not image OCR (see README). Plain text files also work, for
+      the demo samples.
     </p>
     <form id="upload-form">
       <label for="upload-file">Document file (.pdf or .txt)</label>
@@ -38,11 +40,6 @@
       <div id="review-content"></div>
     </section>
   </div>
-
-  <section class="panel" id="issue-panel" style="display: none">
-    <h2>Issue a credential</h2>
-    <div id="issue-content"></div>
-  </section>
 </main>
 
 <script src="/app.js"></script>
@@ -99,105 +96,287 @@
     selectedDocumentId = id;
     renderDocList();
     const doc = await apiFetch(`/documents/${id}`);
-    renderReviewPanel(doc);
+    renderDocumentPanel(doc);
   }
 
-  function renderReviewPanel(doc) {
+  function renderDocumentPanel(doc) {
     const panel = document.getElementById("review-panel");
     const content = document.getElementById("review-content");
     panel.style.display = "block";
     content.innerHTML = "";
 
-    const locked = doc.status === "reviewed";
-
     content.appendChild(
       el("div", { class: "side-by-side" }, [
         el("div", {}, [el("label", { text: "Raw text" }), el("pre", { text: doc.raw_text })]),
-        el("div", {}, buildFieldEditor(doc, locked)),
+        el("div", {}, [
+          el("label", { text: "Certificate" }),
+          el("p", {
+            class: "muted",
+            text: `${doc.certificate_id || "no certificate id found"} · Supplier: ${doc.supplier_id || "—"} · ${doc.heats.length} heat(s)`,
+          }),
+        ]),
       ])
     );
 
-    if (locked) {
-      content.appendChild(
-        el("p", { class: "success", text: `Reviewed by ${doc.reviewed_by} at ${doc.reviewed_at}. Locked from further edits.` })
-      );
-      renderIssuePanel(doc);
-    } else {
-      document.getElementById("issue-panel").style.display = "none";
+    for (const heat of doc.heats) {
+      content.appendChild(renderHeatCard(doc, heat));
     }
   }
 
-  const LOW_CONFIDENCE_THRESHOLD = 0.7;
-
-  function confidenceLabel(confidence) {
-    if (!confidence) return "not found";
-    if (confidence < LOW_CONFIDENCE_THRESHOLD) return "low confidence — review carefully";
-    return "extracted";
+  // Three states per the spec — found / not found / flagged. "Flagged"
+  // is distinct from "not found": a value is present but needs scrutiny
+  // (e.g. a sub-lot origin that's unconfirmed or covered-country), so it
+  // must never collapse into looking like a clean miss.
+  function tag(state, label) {
+    const cls = state === "flagged" ? "tag-flagged" : state === "found" ? "tag-found" : "tag-missing";
+    const defaultLabel = state === "flagged" ? "flagged" : state === "found" ? "found" : "not found";
+    return el("span", { class: `tag ${cls}`, text: label || defaultLabel });
   }
 
-  function confidenceClass(confidence) {
-    if (!confidence) return "conf-none";
-    if (confidence < LOW_CONFIDENCE_THRESHOLD) return "conf-low";
-    return "conf-high";
+  function buildKeyValueEditor(initialDict, locked) {
+    const container = el("div", { class: "kv-editor" });
+    const rows = [];
+    let addBtn = null;
+
+    function addRow(key, value) {
+      const keyInput = el("input", { type: "text", class: "kv-key", value: key || "", placeholder: "element", disabled: locked ? "disabled" : null });
+      const valueInput = el("input", { type: "text", value: value === undefined || value === null ? "" : String(value), placeholder: "wt%", disabled: locked ? "disabled" : null });
+      const children = [keyInput, valueInput];
+      if (!locked) {
+        children.push(
+          el("button", { class: "icon-btn", type: "button", text: "×", onclick: () => { row.remove(); rows.splice(rows.indexOf(row), 1); } })
+        );
+      }
+      const row = el("div", { class: "kv-row" }, children);
+      rows.push(row);
+      if (addBtn) container.insertBefore(row, addBtn);
+      else container.appendChild(row);
+    }
+
+    for (const [key, value] of Object.entries(initialDict || {})) addRow(key, value);
+    if (!locked) {
+      addBtn = el("button", { class: "icon-btn", type: "button", text: "+ element" });
+      addBtn.addEventListener("click", () => addRow("", ""));
+      container.appendChild(addBtn);
+    }
+
+    return {
+      container,
+      getValue() {
+        const result = {};
+        for (const row of rows) {
+          const inputs = row.querySelectorAll("input");
+          const key = inputs[0].value.trim();
+          if (!key) continue;
+          const num = parseFloat(inputs[1].value);
+          result[key] = Number.isNaN(num) ? inputs[1].value : num;
+        }
+        return result;
+      },
+    };
   }
 
-  function buildFieldEditor(doc, locked) {
-    const inputs = [];
-    const rows = [el("label", { text: "Extracted fields" })];
-    for (const field of doc.extracted_fields) {
-      const input = el("input", { type: "text", value: field.field_value || "", disabled: locked ? "disabled" : null });
-      input.dataset.fieldName = field.field_name;
-      inputs.push(input);
-      rows.push(
-        el("div", { class: "field-row" }, [
-          el("div", { class: "field-row-head" }, [
-            el("span", { class: "field-row-label", text: field.field_name }),
-            el("span", { class: `conf ${confidenceClass(field.confidence)}`, text: confidenceLabel(field.confidence) }),
-          ]),
-          input,
+  function buildSublotEditor(initialSublots, locked) {
+    const tbody = el("tbody");
+    const rows = [];
+
+    function addRow(sublot) {
+      sublot = sublot || {};
+      const sublotIdInput = el("input", { type: "text", value: sublot.sublot_id || "", disabled: locked ? "disabled" : null });
+      const blendInput = el("input", { type: "text", value: sublot.blend_pct ?? "", disabled: locked ? "disabled" : null });
+      const originInput = el("input", { type: "text", value: sublot.origin_country || "", disabled: locked ? "disabled" : null });
+      const confidenceSelect = el("select", { disabled: locked ? "disabled" : null }, [
+        el("option", { value: "", text: "—" }),
+        el("option", { value: "high", text: "high" }),
+        el("option", { value: "low", text: "low" }),
+      ]);
+      confidenceSelect.value = sublot.origin_confidence || "";
+      const notesInput = el("input", { type: "text", value: sublot.notes || "", disabled: locked ? "disabled" : null });
+      const statusTag = sublot.flagged ? tag("flagged", sublot.flagged_reason || "flagged") : tag("found", "ok");
+
+      const cells = [
+        el("td", {}, [sublotIdInput]),
+        el("td", {}, [blendInput]),
+        el("td", {}, [originInput]),
+        el("td", {}, [confidenceSelect]),
+        el("td", {}, [notesInput]),
+        el("td", {}, [statusTag]),
+      ];
+      if (!locked) {
+        cells.push(
+          el("td", {}, [
+            el("button", { class: "icon-btn", type: "button", text: "×", onclick: () => { row.remove(); rows.splice(rows.indexOf(row), 1); } }),
+          ])
+        );
+      }
+      const row = el("tr", { class: sublot.flagged ? "flagged-row" : "" }, cells);
+      rows.push(row);
+      tbody.appendChild(row);
+    }
+
+    for (const sublot of initialSublots || []) addRow(sublot);
+
+    const headerCells = [
+      el("th", { text: "Sub-lot" }),
+      el("th", { text: "Blend %" }),
+      el("th", { text: "Origin" }),
+      el("th", { text: "Confidence" }),
+      el("th", { text: "Notes" }),
+      el("th", { text: "Status" }),
+    ];
+    if (!locked) headerCells.push(el("th", { text: "" }));
+
+    const table = el("table", { class: "editable-table" }, [el("thead", {}, [el("tr", {}, headerCells)]), tbody]);
+    const container = el("div", {}, [table]);
+    if (!locked) {
+      container.appendChild(el("button", { class: "icon-btn", type: "button", text: "+ sub-lot", onclick: () => addRow({}) }));
+    }
+
+    return {
+      container,
+      getValue() {
+        return rows.map((row) => {
+          const inputs = row.querySelectorAll("input");
+          const select = row.querySelector("select");
+          const blend = parseFloat(inputs[1].value);
+          return {
+            sublot_id: inputs[0].value || null,
+            blend_pct: Number.isNaN(blend) ? null : blend,
+            origin_country: inputs[2].value || null,
+            origin_confidence: select.value || null,
+            notes: inputs[3].value || null,
+          };
+        });
+      },
+    };
+  }
+
+  function renderHeatCard(doc, heat) {
+    const locked = heat.reviewed;
+    const card = el("div", { class: "heat-card" });
+
+    const headerTags = [heat.flagged_for_review ? tag("flagged", "flagged for review") : tag("found", "clean")];
+    headerTags.push(el("span", { class: `badge status-${locked ? "reviewed" : "extracted"}`, text: locked ? "reviewed" : "needs review" }));
+
+    card.appendChild(
+      el("div", { class: "heat-card-header" }, [
+        el("h3", { text: `Heat: ${heat.heat_id || "(no heat id found)"}` }),
+        el("div", {}, headerTags),
+      ])
+    );
+    if (heat.flagged_for_review && heat.flagged_reason) {
+      card.appendChild(el("p", { class: "muted", text: `Why flagged: ${heat.flagged_reason}` }));
+    }
+
+    const heatIdInput = el("input", { type: "text", value: heat.heat_id || "", disabled: locked ? "disabled" : null });
+    const massInput = el("input", { type: "text", value: heat.mass_kg ?? "", disabled: locked ? "disabled" : null });
+
+    card.append(
+      el("div", { class: "field-row" }, [
+        el("div", { class: "field-row-head" }, [el("span", { class: "field-row-label", text: "Heat / melt id" }), heat.heat_id ? tag("found") : tag("missing")]),
+        heatIdInput,
+      ]),
+      el("div", { class: "field-row" }, [
+        el("div", { class: "field-row-head" }, [el("span", { class: "field-row-label", text: "Mass (kg)" }), heat.mass_kg != null ? tag("found") : tag("missing")]),
+        massInput,
+      ])
+    );
+
+    card.appendChild(el("label", { text: "Alloy composition (wt%)" }));
+    const compositionEditor = buildKeyValueEditor(heat.alloy_composition, locked);
+    card.appendChild(compositionEditor.container);
+    if (!heat.alloy_composition) card.appendChild(tag("missing", "no composition found"));
+
+    const segAttested = el("input", { type: "checkbox", disabled: locked ? "disabled" : null });
+    segAttested.checked = heat.segregation_attested;
+    const segBy = el("input", { type: "text", value: heat.segregation_attested_by || "", disabled: locked ? "disabled" : null });
+    const segNote = el("textarea", { rows: "2", disabled: locked ? "disabled" : null });
+    segNote.value = heat.segregation_note || "";
+
+    card.append(
+      el("label", { style: "display:flex;align-items:center;gap:0.4rem;font-weight:normal" }, [segAttested, document.createTextNode("Segregation attested")]),
+      el("label", { text: "Attested by" }),
+      segBy,
+      el("label", { text: "Segregation note" }),
+      segNote
+    );
+
+    card.appendChild(el("label", { text: "Feedstock sub-lots" }));
+    const sublotEditor = buildSublotEditor(heat.sublots, locked);
+    card.appendChild(sublotEditor.container);
+
+    const statusEl = el("p", { class: "error" });
+
+    if (!locked) {
+      card.appendChild(
+        el("button", {
+          text: "Submit review",
+          style: "margin-top: 0.75rem",
+          onclick: async () => {
+            statusEl.textContent = "";
+            const body = {
+              heat_id: heatIdInput.value || null,
+              alloy_composition: Object.keys(compositionEditor.getValue()).length ? compositionEditor.getValue() : null,
+              mass_kg: massInput.value ? parseFloat(massInput.value) : null,
+              segregation_attested: segAttested.checked,
+              segregation_attested_by: segBy.value || null,
+              segregation_note: segNote.value || null,
+              nonconformance_refs: heat.nonconformance_refs || [],
+              sublots: sublotEditor.getValue(),
+            };
+            try {
+              await apiFetch(`/documents/${doc.id}/heats/${heat.id}/review`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+              });
+              const updatedDoc = await apiFetch(`/documents/${doc.id}`);
+              await refreshAll();
+              renderDocumentPanel(updatedDoc);
+            } catch (err) {
+              statusEl.textContent = err.message;
+            }
+          },
+        })
+      );
+    } else if (heat.credential_id) {
+      card.appendChild(
+        el("p", { class: "success" }, [
+          document.createTextNode(`Credential issued: ${heat.credential_id}. `),
+          el("a", { href: `/passport.html?id=${heat.credential_id}`, text: "View passport →" }),
         ])
       );
+    } else {
+      card.appendChild(el("p", { class: "success", text: `Reviewed by ${heat.reviewed_by} at ${heat.reviewed_at}. Locked from further edits.` }));
+      card.appendChild(renderIssuePanel(doc, heat));
     }
-    if (!locked) {
-      const submitBtn = el("button", {
-        text: "Submit review",
-        onclick: async () => {
-          const fields = inputs.map((i) => ({ field_name: i.dataset.fieldName, field_value: i.value || null }));
-          try {
-            const updated = await apiFetch(`/documents/${doc.id}/review`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ fields }),
-            });
-            await refreshAll();
-            renderReviewPanel(updated);
-          } catch (err) {
-            alert(err.message);
-          }
-        },
-      });
-      rows.push(submitBtn);
-    }
-    return rows;
+
+    card.appendChild(statusEl);
+    return card;
   }
 
-  function fieldValue(doc, name) {
-    const f = doc.extracted_fields.find((x) => x.field_name === name);
-    return f ? f.field_value || "" : "";
-  }
+  function renderIssuePanel(doc, heat) {
+    const container = el("div", { style: "margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border)" });
+    container.appendChild(el("h4", { text: "Issue a credential from this heat", style: "margin: 0 0 0.5rem 0; font-size: 0.85rem" }));
 
-  function renderIssuePanel(doc) {
-    const panel = document.getElementById("issue-panel");
-    const content = document.getElementById("issue-content");
-    panel.style.display = "block";
-    content.innerHTML = "";
+    const compositionKeys = Object.keys(heat.alloy_composition || {});
+    const looksLikeNdFeB = ["Nd", "Fe", "B"].every((k) => compositionKeys.includes(k));
+    const defaultMaterial = looksLikeNdFeB ? "Sintered NdFeB Magnet Alloy" : "";
 
-    const credentialType = el("input", { type: "text", id: "credential-type", value: "collected_scrap_lot" });
-    const materialType = el("input", { type: "text", id: "material-type", value: fieldValue(doc, "material_type") });
-    const originCountry = el("input", { type: "text", id: "origin-country", value: fieldValue(doc, "origin_country") });
-    const massKg = el("input", { type: "text", id: "mass-kg", value: fieldValue(doc, "mass_kg") });
-    const heatNumber = el("input", { type: "text", id: "heat-number", value: fieldValue(doc, "heat_number") });
-    const supplierName = el("input", { type: "text", id: "supplier-name", value: fieldValue(doc, "supplier_name") });
+    const uniqueOrigins = [...new Set(heat.sublots.map((s) => s.origin_country).filter(Boolean))];
+    const anyFlaggedSublot = heat.sublots.some((s) => s.flagged);
+    const defaultOrigin = !anyFlaggedSublot && uniqueOrigins.length === 1 ? uniqueOrigins[0] : "";
+
+    if (heat.sublots.length && !defaultOrigin) {
+      container.appendChild(el("p", { class: "muted", text: "Sub-lots have mixed or flagged origins — confirm the origin country manually before issuing." }));
+    }
+
+    const credentialType = el("input", { type: "text", value: "collected_scrap_lot" });
+    const materialType = el("input", { type: "text", value: defaultMaterial });
+    const originCountry = el("input", { type: "text", value: defaultOrigin });
+    const massKg = el("input", { type: "text", value: heat.mass_kg ?? "" });
+    const heatNumber = el("input", { type: "text", value: heat.heat_id || "" });
+    const supplierName = el("input", { type: "text", value: doc.supplier_id || "" });
 
     const sourceCheckboxes = credentials.map((c) =>
       el("label", { style: "display:flex;align-items:center;gap:0.4rem;font-weight:normal;color:inherit" }, [
@@ -206,22 +385,29 @@
       ])
     );
 
-    const segregationBlock = el("div", { id: "segregation-block", style: "display:none" }, [
-      el("label", { text: "Segregation attested" }),
+    const segregationBlock = el("div", { style: heat.segregation_attested ? "display:block" : "display:none" }, [
       el("label", { style: "display:flex;align-items:center;gap:0.4rem;font-weight:normal" }, [
-        el("input", { type: "checkbox", id: "segregation-attested" }),
+        el("input", { type: "checkbox", id: `seg-attested-${heat.id}` }),
         document.createTextNode("I attest the sources were physically/documentarily segregated"),
       ]),
       el("label", { text: "Attested by (named person)" }),
-      el("input", { type: "text", id: "segregation-attested-by" }),
+      el("input", { type: "text", id: `seg-by-${heat.id}` }),
       el("label", { text: "Control description" }),
-      el("textarea", { id: "segregation-note", rows: "2" }),
+      el("textarea", { id: `seg-note-${heat.id}`, rows: "2" }),
     ]);
+    const segAttestedCb = segregationBlock.querySelector(`#seg-attested-${heat.id}`);
+    const segByInput = segregationBlock.querySelector(`#seg-by-${heat.id}`);
+    const segNoteInput = segregationBlock.querySelector(`#seg-note-${heat.id}`);
+    if (heat.segregation_attested) {
+      segAttestedCb.checked = true;
+      segByInput.value = heat.segregation_attested_by || "";
+      segNoteInput.value = heat.segregation_note || "";
+    }
 
     for (const cb of sourceCheckboxes) {
       cb.querySelector("input").addEventListener("change", () => {
-        const checked = content.querySelectorAll(".source-checkbox:checked").length;
-        segregationBlock.style.display = checked >= 2 ? "block" : "none";
+        const checked = container.querySelectorAll(".source-checkbox:checked").length;
+        if (checked >= 2) segregationBlock.style.display = "block";
       });
     }
 
@@ -230,10 +416,10 @@
     const submitBtn = el("button", {
       text: "Issue credential",
       onclick: async () => {
-        const sources = Array.from(content.querySelectorAll(".source-checkbox:checked")).map((c) => c.value);
+        const sources = Array.from(container.querySelectorAll(".source-checkbox:checked")).map((c) => c.value);
         const body = {
           credential_type: credentialType.value,
-          document_id: doc.id,
+          heat_id: heat.id,
           subject: {
             material_type: materialType.value,
             origin_country: originCountry.value,
@@ -242,9 +428,9 @@
             supplier_name: supplierName.value,
           },
           sources,
-          segregation_attested: document.getElementById("segregation-attested")?.checked || false,
-          segregation_attested_by: document.getElementById("segregation-attested-by")?.value || null,
-          segregation_note: document.getElementById("segregation-note")?.value || null,
+          segregation_attested: segAttestedCb.checked,
+          segregation_attested_by: segByInput.value || null,
+          segregation_note: segNoteInput.value || null,
         };
         try {
           const cred = await apiFetch("/credentials/issue", {
@@ -253,9 +439,7 @@
             body: JSON.stringify(body),
           });
           resultEl.innerHTML = "";
-          resultEl.appendChild(
-            el("span", { class: "success", text: `Issued credential ${cred.id}. ` })
-          );
+          resultEl.appendChild(el("span", { class: "success", text: `Issued credential ${cred.id}. ` }));
           resultEl.appendChild(el("a", { href: `/passport.html?id=${cred.id}`, text: "View passport →" }));
           resultEl.appendChild(
             el("div", { style: "margin-top: 0.5rem" }, [
@@ -268,6 +452,7 @@
             ])
           );
           credentials = await apiFetch("/credentials");
+          await refreshAll();
         } catch (err) {
           resultEl.innerHTML = "";
           resultEl.appendChild(el("span", { class: "error", text: err.message }));
@@ -275,7 +460,7 @@
       },
     });
 
-    content.append(
+    container.append(
       el("label", { text: "Credential type" }), credentialType,
       el("label", { text: "Material type" }), materialType,
       el("label", { text: "Origin country" }), originCountry,
@@ -288,6 +473,8 @@
       submitBtn,
       resultEl
     );
+
+    return container;
   }
 
   (async () => {

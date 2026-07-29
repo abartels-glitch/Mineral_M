@@ -1,0 +1,313 @@
+"""Upload -> per-heat review -> credential issuance, via the same
+TestClient + dependency-override pattern as test_auth.py. No API key is
+present in this environment, so extraction runs the deterministic regex
+fallback (one flagged heat) unless a test monkeypatches
+llm_extractor.extract_structured directly to exercise the multi-heat/
+sub-lot path without a live network call.
+"""
+import hashlib
+import sqlite3
+
+import pytest
+from fastapi.testclient import TestClient
+
+import auth
+import crypto_utils
+import llm_extractor
+import main
+import storage
+from db import SCHEMA
+
+MTR_TEXT = (
+    "CERTIFICATE OF CONFORMANCE / MILL TEST REPORT\n"
+    "Supplier: Test Recycler, LLC\n"
+    "Heat Number: TR-0001\n"
+    "Material: Sintered NdFeB Magnet Alloy (N42)\n"
+    "Country of Origin: United States\n"
+    "Batch Mass: 50.0 kg\n"
+)
+
+
+@pytest.fixture
+def conn(tmp_path, monkeypatch):
+    monkeypatch.setattr(crypto_utils, "KEYS_DIR", tmp_path / "keys")
+    monkeypatch.setattr(storage, "OBJECTS_DIR", tmp_path / "objects")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    c = sqlite3.connect(":memory:", check_same_thread=False)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA foreign_keys = ON")
+    c.executescript(SCHEMA)
+    yield c
+    c.close()
+
+
+@pytest.fixture
+def client(conn):
+    def override_get_db():
+        yield conn
+
+    main.app.dependency_overrides[main.get_db] = override_get_db
+    yield TestClient(main.app)
+    main.app.dependency_overrides.clear()
+
+
+def make_issuer(conn, name="Test Org"):
+    issuer_id = "issuer-" + name.lower().replace(" ", "-")
+    public_key_b64, private_key_path = crypto_utils.generate_issuer_keypair(issuer_id)
+    conn.execute(
+        "INSERT INTO issuers (id, name, public_key, private_key_path, created_at) VALUES (?, ?, ?, ?, ?)",
+        (issuer_id, name, public_key_b64, private_key_path, "2026-01-01T00:00:00Z"),
+    )
+    conn.commit()
+    return issuer_id
+
+
+def make_user(conn, email, password, role, org_id=None):
+    user_id = "user-" + email.split("@")[0]
+    conn.execute(
+        "INSERT INTO users (id, org_id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, org_id, email, auth.hash_password(password), role, "2026-01-01T00:00:00Z"),
+    )
+    conn.commit()
+    return user_id
+
+
+def _upload(client, filename="mtr.txt"):
+    return client.post(
+        "/documents/upload",
+        files={"file": (filename, MTR_TEXT.encode(), "text/plain")},
+        data={"document_type": "mtr_coc"},
+    )
+
+
+def _login_org_user(client, conn):
+    org_id = make_issuer(conn)
+    make_user(conn, "u@example.com", "pw", "org_user", org_id)
+    client.post("/auth/login", json={"email": "u@example.com", "password": "pw"})
+    return org_id
+
+
+def test_upload_stores_object_and_content_hash(client, conn):
+    _login_org_user(client, conn)
+    resp = _upload(client)
+    assert resp.status_code == 200
+    doc_id = resp.json()["id"]
+
+    row = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    assert row["object_key"] == f"{doc_id}/mtr.txt"
+    assert row["content_hash"] == hashlib.sha256(MTR_TEXT.encode()).hexdigest()
+    assert storage.read_object(row["object_key"]) == MTR_TEXT.encode()
+
+
+def test_upload_extraction_falls_back_to_one_flagged_heat(client, conn):
+    _login_org_user(client, conn)
+    resp = _upload(client)
+    body = resp.json()
+
+    assert body["supplier_id"] == "Test Recycler, LLC"
+    assert len(body["heats"]) == 1
+    heat = body["heats"][0]
+    assert heat["heat_id"] == "TR-0001"
+    assert heat["source"] == "regex"
+    assert heat["extraction_source"] == "regex"
+    assert heat["flagged_for_review"] is True
+    assert heat["reviewed"] is False
+    assert len(heat["sublots"]) == 1
+    assert heat["sublots"][0]["origin_country"] == "United States"
+
+
+def test_upload_with_mocked_multi_heat_flagged_sublot(client, conn, monkeypatch):
+    """Exercises the real main.py write path (heats + sub-lots + flag
+    evaluation) against a controlled multi-heat extraction result,
+    without needing a live LLM call."""
+
+    def fake_extract_structured(raw_text):
+        return {
+            "certificate_id": "RGM-CERT-2026-0498",
+            "supplier_id": "Rio Grande Magnetics, LLC",
+            "signatures": [],
+            "heats": [
+                {
+                    "heat_id": "H-1",
+                    "alloy_composition": {"Nd": 29.8, "Fe": 67.9, "B": 1.1},
+                    "test_results": None,
+                    "nonconformance_refs": [],
+                    "feedstock_sublots": [
+                        {"sublot_id": "A1", "blend_pct": 100.0, "origin_country": "United States", "origin_confidence": "high", "notes": None}
+                    ],
+                    "segregation_attested": True,
+                    "segregation_note": "Dedicated line.",
+                    "mass_kg": 210.0,
+                    "confidence": 0.9,
+                    "flagged_for_review": False,
+                    "flagged_reason": None,
+                    "source": "llm",
+                },
+                {
+                    "heat_id": "H-2",
+                    "alloy_composition": {"Nd": 30.1, "Fe": 67.5, "B": 1.0},
+                    "test_results": None,
+                    "nonconformance_refs": [],
+                    "feedstock_sublots": [
+                        {"sublot_id": "C1", "blend_pct": 80.0, "origin_country": "United States", "origin_confidence": "high", "notes": None},
+                        {"sublot_id": "C2", "blend_pct": 20.0, "origin_country": "China", "origin_confidence": "high", "notes": "broker-sourced"},
+                    ],
+                    "segregation_attested": True,
+                    "segregation_note": "Dedicated line; broker addition per C2.",
+                    "mass_kg": 120.0,
+                    "confidence": 0.9,
+                    "flagged_for_review": False,
+                    "flagged_reason": None,
+                    "source": "llm",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(llm_extractor, "extract_structured", fake_extract_structured)
+    _login_org_user(client, conn)
+    body = _upload(client, filename="complex.txt").json()
+
+    assert body["certificate_id"] == "RGM-CERT-2026-0498"
+    assert len(body["heats"]) == 2
+
+    heat1 = next(h for h in body["heats"] if h["heat_id"] == "H-1")
+    heat2 = next(h for h in body["heats"] if h["heat_id"] == "H-2")
+
+    assert heat1["flagged_for_review"] is False
+    # H-2 wasn't flagged by the (mocked) LLM, but its China sub-lot is
+    # covered — main.py's deterministic per-sub-lot check must catch it
+    # even when the model's own judgment doesn't.
+    assert heat2["flagged_for_review"] is True
+    assert "FEOC-covered" in heat2["flagged_reason"]
+    china_sublot = next(s for s in heat2["sublots"] if s["origin_country"] == "China")
+    assert china_sublot["flagged"] is True
+
+
+def test_review_heat_locks_after_review(client, conn):
+    _login_org_user(client, conn)
+    upload = _upload(client).json()
+    doc_id = upload["id"]
+    heat_id = upload["heats"][0]["id"]
+
+    review_body = {
+        "heat_id": "TR-0001",
+        "alloy_composition": {"Nd": 29.5, "Fe": 68.2, "B": 1.0},
+        "segregation_attested": True,
+        "segregation_attested_by": "Maria Alvarez, QA Lead",
+        "segregation_note": "Dedicated line, purged between runs.",
+        "mass_kg": 50.0,
+        "sublots": [
+            {"sublot_id": None, "blend_pct": 100.0, "origin_country": "United States", "origin_confidence": "high", "notes": None}
+        ],
+    }
+    resp = client.post(f"/documents/{doc_id}/heats/{heat_id}/review", json=review_body)
+    assert resp.status_code == 200
+    reviewed = resp.json()
+    assert reviewed["reviewed"] is True
+    assert reviewed["source"] == "human"
+    assert reviewed["flagged_for_review"] is False  # corrected sub-lot is now high-confidence domestic
+    assert reviewed["alloy_composition"] == {"Nd": 29.5, "Fe": 68.2, "B": 1.0}
+
+    again = client.post(f"/documents/{doc_id}/heats/{heat_id}/review", json=review_body)
+    assert again.status_code == 409
+
+
+def test_review_heat_requires_org_match(client, conn):
+    org_a = make_issuer(conn, "Org A")
+    make_user(conn, "a@example.com", "pw", "org_user", org_a)
+    org_b = make_issuer(conn, "Org B")
+    make_user(conn, "b@example.com", "pw", "org_user", org_b)
+
+    client.post("/auth/login", json={"email": "a@example.com", "password": "pw"})
+    upload = _upload(client).json()
+    doc_id = upload["id"]
+    heat_id = upload["heats"][0]["id"]
+    client.post("/auth/logout")
+
+    client.post("/auth/login", json={"email": "b@example.com", "password": "pw"})
+    resp = client.post(f"/documents/{doc_id}/heats/{heat_id}/review", json={"sublots": []})
+    assert resp.status_code == 403
+
+
+def test_credential_issue_requires_reviewed_heat(client, conn):
+    _login_org_user(client, conn)
+    upload = _upload(client).json()
+    doc_id = upload["id"]
+    heat_id = upload["heats"][0]["id"]
+
+    unreviewed = client.post(
+        "/credentials/issue",
+        json={
+            "credential_type": "collected_scrap_lot",
+            "heat_id": heat_id,
+            "subject": {"material_type": "NdFeB", "origin_country": "United States"},
+            "sources": [],
+        },
+    )
+    assert unreviewed.status_code == 400
+
+    client.post(
+        f"/documents/{doc_id}/heats/{heat_id}/review",
+        json={
+            "heat_id": "TR-0001",
+            "mass_kg": 50.0,
+            "sublots": [{"origin_country": "United States", "origin_confidence": "high", "blend_pct": 100.0}],
+        },
+    )
+
+    issued = client.post(
+        "/credentials/issue",
+        json={
+            "credential_type": "collected_scrap_lot",
+            "heat_id": heat_id,
+            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
+            "sources": [],
+        },
+    )
+    assert issued.status_code == 200
+    cred_id = issued.json()["id"]
+
+    heat_row = conn.execute("SELECT credential_id FROM document_heats WHERE id = ?", (heat_id,)).fetchone()
+    assert heat_row["credential_id"] == cred_id
+
+    double_issue = client.post(
+        "/credentials/issue",
+        json={
+            "credential_type": "collected_scrap_lot",
+            "heat_id": heat_id,
+            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
+            "sources": [],
+        },
+    )
+    assert double_issue.status_code == 409
+
+
+def test_extraction_stats_reflects_flagged_and_reviewed(client, conn):
+    make_user(conn, "admin@example.com", "pw", "platform_admin")
+    _login_org_user(client, conn)
+    upload = _upload(client).json()
+    doc_id = upload["id"]
+    heat_id = upload["heats"][0]["id"]
+
+    client.post(
+        f"/documents/{doc_id}/heats/{heat_id}/review",
+        json={
+            "heat_id": "TR-0001",
+            "mass_kg": 50.0,
+            "sublots": [{"origin_country": "United States", "origin_confidence": "high", "blend_pct": 100.0}],
+        },
+    )
+    client.post("/auth/logout")
+
+    client.post("/auth/login", json={"email": "admin@example.com", "password": "pw"})
+    stats = client.get("/admin/extraction-stats").json()
+
+    regex_overall = next(r for r in stats["overall"] if r["extraction_source"] == "regex")
+    assert regex_overall["total"] == 1
+    assert regex_overall["reviewed"] == 1
+
+
+def test_extraction_stats_requires_platform_admin(client, conn):
+    _login_org_user(client, conn)
+    resp = client.get("/admin/extraction-stats")
+    assert resp.status_code == 403

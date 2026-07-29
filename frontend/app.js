@@ -31,6 +31,19 @@ async function requireAuth(allowedRoles) {
   return user;
 }
 
+async function getCurrentUserOrNull() {
+  // Unlike requireAuth(), never redirects — for pages like passport.html
+  // that must stay fully usable when logged out, but show extra depth
+  // when a session happens to exist.
+  try {
+    const user = await apiFetch("/auth/me");
+    renderUserHeader(user);
+    return user;
+  } catch (e) {
+    return null;
+  }
+}
+
 function renderUserHeader(user) {
   const nav = document.querySelector("header nav");
   if (!nav) return;

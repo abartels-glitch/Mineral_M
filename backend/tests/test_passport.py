@@ -54,12 +54,28 @@ def make_document(conn, org_id: str, raw_bytes: bytes = b"CERTIFICATE OF CONFORM
     conn.execute(
         """
         INSERT INTO documents (id, org_id, filename, document_type, object_key, content_hash, raw_text, status, uploaded_at)
-        VALUES (?, ?, 'cert.txt', 'mtr_coc', ?, ?, ?, 'reviewed', '2026-01-01T00:00:00Z')
+        VALUES (?, ?, 'cert.txt', 'mtr_coc', ?, ?, ?, 'extracted', '2026-01-01T00:00:00Z')
         """,
         (document_id, org_id, object_key, hashlib.sha256(raw_bytes).hexdigest(), raw_bytes.decode()),
     )
     conn.commit()
     return document_id
+
+
+def make_reviewed_heat(conn, document_id: str) -> str:
+    """A minimal already-reviewed heat for a document — credential
+    issuance (seed.issue_credential / main.py's real route) links a
+    credential to a document via a heat, not the document directly."""
+    heat_id = uuid.uuid4().hex
+    conn.execute(
+        """
+        INSERT INTO document_heats (id, document_id, reviewed, source, extraction_source)
+        VALUES (?, ?, 1, 'human', 'regex')
+        """,
+        (heat_id, document_id),
+    )
+    conn.commit()
+    return heat_id
 
 
 def test_single_source_credential_passes(conn):
@@ -197,7 +213,8 @@ def test_missing_referenced_credential_fails(conn):
 def test_credential_with_untampered_document_passes(conn):
     issuer_id, key_path = make_issuer(conn)
     doc_id = make_document(conn, issuer_id)
-    cred_id = issue_credential(conn, issuer_id, key_path, "sintered_ndfeb_batch", US_NDFEB_SUBJECT, doc_id, [])
+    heat_id = make_reviewed_heat(conn, doc_id)
+    cred_id = issue_credential(conn, issuer_id, key_path, "sintered_ndfeb_batch", US_NDFEB_SUBJECT, heat_id, [])
     conn.commit()
 
     result = passport_engine.compile_passport(conn, cred_id)
@@ -208,7 +225,8 @@ def test_credential_with_untampered_document_passes(conn):
 def test_swapped_document_bytes_fail_tamper_check(conn):
     issuer_id, key_path = make_issuer(conn)
     doc_id = make_document(conn, issuer_id)
-    cred_id = issue_credential(conn, issuer_id, key_path, "sintered_ndfeb_batch", US_NDFEB_SUBJECT, doc_id, [])
+    heat_id = make_reviewed_heat(conn, doc_id)
+    cred_id = issue_credential(conn, issuer_id, key_path, "sintered_ndfeb_batch", US_NDFEB_SUBJECT, heat_id, [])
     conn.commit()
 
     # Tamper: overwrite the stored object's bytes without touching the
@@ -225,7 +243,8 @@ def test_swapped_document_bytes_fail_tamper_check(conn):
 def test_missing_document_object_fails(conn):
     issuer_id, key_path = make_issuer(conn)
     doc_id = make_document(conn, issuer_id)
-    cred_id = issue_credential(conn, issuer_id, key_path, "sintered_ndfeb_batch", US_NDFEB_SUBJECT, doc_id, [])
+    heat_id = make_reviewed_heat(conn, doc_id)
+    cred_id = issue_credential(conn, issuer_id, key_path, "sintered_ndfeb_batch", US_NDFEB_SUBJECT, heat_id, [])
     conn.commit()
 
     object_key = conn.execute("SELECT object_key FROM documents WHERE id = ?", (doc_id,)).fetchone()["object_key"]

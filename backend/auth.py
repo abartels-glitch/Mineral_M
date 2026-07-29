@@ -92,7 +92,12 @@ def require_role(user: dict, *roles: str) -> None:
 
 
 def require_org_match(user: dict, org_id: str) -> None:
-    if user["role"] == "platform_admin":
+    # platform_admin and buyer_auditor are both legitimately cross-org
+    # read roles — the callers that actually let buyer_auditor reach
+    # this check (e.g. the audit-trail route) want that; document/review
+    # routes never grant buyer_auditor access in the first place, since
+    # require_role already excludes it there.
+    if user["role"] in ("platform_admin", "buyer_auditor"):
         return
     if user["org_id"] != org_id:
         raise HTTPException(403, "not authorized for this organization")

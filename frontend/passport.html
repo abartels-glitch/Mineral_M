@@ -46,10 +46,50 @@
       <tbody id="node-rows"></tbody>
     </table>
   </section>
+
+  <section class="panel" id="audit-panel" style="display: none">
+    <h2>Audit trail</h2>
+    <p class="muted">
+      Only visible to logged-in accounts — this is the extra depth a
+      review beyond the public passport gets: who did what, when, and
+      whether any extracted field was corrected by a human reviewer.
+    </p>
+    <h3>Timeline</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>When</th>
+          <th>Action</th>
+          <th>Actor</th>
+          <th>Detail</th>
+        </tr>
+      </thead>
+      <tbody id="audit-rows"></tbody>
+    </table>
+    <div id="provenance-block" style="display: none">
+      <h3>Extraction &amp; review provenance</h3>
+      <p id="heat-summary" class="muted"></p>
+      <table>
+        <thead>
+          <tr>
+            <th>Sub-lot</th>
+            <th>Blend %</th>
+            <th>Origin</th>
+            <th>Confidence</th>
+            <th>Notes</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="sublot-rows"></tbody>
+      </table>
+    </div>
+  </section>
 </main>
 
 <script src="/app.js"></script>
 <script>
+  let currentUser = null;
+
   const input = document.getElementById("credential-id");
   const params = new URLSearchParams(location.search);
   if (params.get("id")) input.value = params.get("id");
@@ -58,12 +98,17 @@
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") lookup();
   });
-  if (params.get("id")) lookup();
+
+  (async () => {
+    currentUser = await getCurrentUserOrNull();
+    if (params.get("id")) lookup();
+  })();
 
   async function lookup() {
     const id = input.value.trim();
     const errorEl = document.getElementById("lookup-error");
     const resultPanel = document.getElementById("result-panel");
+    const auditPanel = document.getElementById("audit-panel");
     errorEl.textContent = "";
     if (!id) {
       errorEl.textContent = "Enter a credential id.";
@@ -75,7 +120,77 @@
       resultPanel.style.display = "block";
     } catch (e) {
       resultPanel.style.display = "none";
+      auditPanel.style.display = "none";
       errorEl.textContent = e.message;
+      return;
+    }
+
+    if (currentUser) {
+      try {
+        const trail = await apiFetch(`/credentials/${encodeURIComponent(id)}/audit-trail`);
+        renderAuditTrail(trail);
+        auditPanel.style.display = "block";
+      } catch (e) {
+        // Expected for org_users looking up another org's credential —
+        // not an error worth surfacing, just no extra depth to show.
+        auditPanel.style.display = "none";
+      }
+    } else {
+      auditPanel.style.display = "none";
+    }
+  }
+
+  function renderAuditTrail(trail) {
+    const rows = document.getElementById("audit-rows");
+    rows.innerHTML = "";
+    const entries = [...trail.audit_log, ...trail.document_audit_log].sort((a, b) =>
+      a.created_at.localeCompare(b.created_at)
+    );
+    for (const entry of entries) {
+      rows.appendChild(
+        el("tr", {}, [
+          el("td", { text: entry.created_at }),
+          el("td", { text: entry.action }),
+          el("td", { text: entry.actor }),
+          el("td", { text: Object.keys(entry.detail).length ? JSON.stringify(entry.detail) : "—" }),
+        ])
+      );
+    }
+
+    const provenanceBlock = document.getElementById("provenance-block");
+    const summaryEl = document.getElementById("heat-summary");
+    const sublotRows = document.getElementById("sublot-rows");
+    sublotRows.innerHTML = "";
+
+    if (trail.heat) {
+      provenanceBlock.style.display = "block";
+      const heat = trail.heat;
+      const compositionText = heat.alloy_composition
+        ? Object.entries(heat.alloy_composition).map(([k, v]) => `${k} ${v}%`).join(", ")
+        : "not found";
+      const flagText = heat.flagged_for_review ? `FLAGGED — ${heat.flagged_reason}` : "not flagged";
+      summaryEl.textContent =
+        `Heat ${heat.heat_id || "(no id found)"} · extracted via ${heat.extraction_source} · ${flagText} · ` +
+        `composition: ${compositionText} · mass: ${heat.mass_kg ?? "—"} kg`;
+
+      for (const sublot of heat.sublots) {
+        sublotRows.appendChild(
+          el("tr", { class: sublot.flagged ? "flagged-row" : "" }, [
+            el("td", { text: sublot.sublot_id || "—" }),
+            el("td", { text: sublot.blend_pct != null ? String(sublot.blend_pct) : "—" }),
+            el("td", { text: sublot.origin_country || "—" }),
+            el("td", { text: sublot.origin_confidence || "—" }),
+            el("td", { text: sublot.notes || "—" }),
+            el("td", {}, [
+              sublot.flagged
+                ? el("span", { class: "tag tag-flagged", text: sublot.flagged_reason || "flagged" })
+                : el("span", { class: "tag tag-found", text: "ok" }),
+            ]),
+          ])
+        );
+      }
+    } else {
+      provenanceBlock.style.display = "none";
     }
   }
 

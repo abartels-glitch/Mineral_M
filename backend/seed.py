@@ -10,7 +10,10 @@ company or data is represented here.
 
 Builds a 3-node credential graph: two collected_scrap_lot credentials feed
 one sintered_ndfeb_batch credential, which exercises the 2+-source
-segregation check end to end.
+segregation check end to end. Each is a single reviewed heat — matching
+`tests/fixtures/rio_grande_mtr_sample.pdf`'s shape, the clean single-heat
+regression bar, not the multi-heat complex case (that's what the fixture
+PDFs and tests are for).
 
 Idempotent: re-running the script reuses the existing issuer/credentials
 instead of duplicating them.
@@ -20,9 +23,9 @@ import json
 import uuid
 from datetime import datetime, timezone
 
+import audit
 import auth
 import crypto_utils
-import extractor
 import storage
 from db import get_connection, init_db
 
@@ -34,24 +37,24 @@ ADMIN_PASSWORD = "platform-admin-dev"
 
 SCRAP_LOT_1_TEXT = """CERTIFICATE OF CONFORMANCE / MILL TEST REPORT
 Supplier: Rio Grande Magnetics, LLC
-Heat Number: RGM-SCRAP-2026-0091
-Material: Domestically Collected NdFeB Scrap (decommissioned motors)
+Heat No.: RGM-SCRAP-2026-0091
+Feedstock: Domestically Collected NdFeB Scrap (decommissioned motors)
 Country of Origin: United States
 Batch Mass: 410.0 kg
 """
 
 SCRAP_LOT_2_TEXT = """CERTIFICATE OF CONFORMANCE / MILL TEST REPORT
 Supplier: Rio Grande Magnetics, LLC
-Heat Number: RGM-SCRAP-2026-0092
-Material: Domestically Collected NdFeB Scrap (HDD magnets)
+Heat No.: RGM-SCRAP-2026-0092
+Feedstock: Domestically Collected NdFeB Scrap (HDD magnets)
 Country of Origin: United States
 Batch Mass: 165.0 kg
 """
 
 SINTERED_BATCH_TEXT = """CERTIFICATE OF CONFORMANCE / MILL TEST REPORT
 Supplier: Rio Grande Magnetics, LLC
-Heat Number: RGM-NDFEB-2026-0412
-Material: Sintered NdFeB Magnet Alloy (N42)
+Heat No.: RGM-NDFEB-2026-0412
+Alloy Composition (wt%): Nd 29.5, Fe 68.2, B 1.0, Dy 1.3
 Country of Origin: United States
 Batch Mass: 182.5 kg
 """
@@ -63,7 +66,23 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def seed_document(conn, org_id: str, raw_text: str) -> str:
+def seed_document_with_heat(
+    conn,
+    org_id: str,
+    raw_text: str,
+    heat_label: str,
+    origin_country: str,
+    mass_kg: float,
+    alloy_composition: dict | None = None,
+    segregation_attested: bool = False,
+    segregation_note: str | None = None,
+) -> str:
+    """Creates a document plus one already-reviewed heat (a human has
+    confirmed this data, matching the shape a real reviewer produces),
+    marked `extraction_source='regex'` — representing "regex found the
+    flat fields, a human filled in composition/segregation" since regex
+    alone can't parse either. Returns the heat's row id, which is what
+    credential issuance references."""
     document_id = uuid.uuid4().hex
     uploaded_at = now_iso()
     filename = f"{document_id}.txt"
@@ -73,33 +92,68 @@ def seed_document(conn, org_id: str, raw_text: str) -> str:
     content_hash = hashlib.sha256(raw_bytes).hexdigest()
     conn.execute(
         """
-        INSERT INTO documents (id, org_id, filename, document_type, object_key, content_hash, raw_text, status, uploaded_at, reviewed_by, reviewed_at)
-        VALUES (?, ?, ?, 'mtr_coc', ?, ?, ?, 'reviewed', ?, ?, ?)
+        INSERT INTO documents (id, org_id, filename, document_type, object_key, content_hash, raw_text, supplier_id, status, uploaded_at)
+        VALUES (?, ?, ?, 'mtr_coc', ?, ?, ?, ?, 'extracted', ?)
         """,
-        (document_id, org_id, filename, object_key, content_hash, raw_text, uploaded_at, REVIEWER, uploaded_at),
+        (document_id, org_id, filename, object_key, content_hash, raw_text, ISSUER_NAME, uploaded_at),
     )
-    # seed.py uses the deterministic regex extractor directly (not the LLM
-    # path) so `python seed.py` works offline with no API key required.
-    for field in extractor.extract_fields(raw_text):
-        conn.execute(
-            """
-            INSERT INTO extracted_fields (id, document_id, field_name, field_value, confidence, source, extraction_source, overridden_by_human)
-            VALUES (?, ?, ?, ?, ?, 'regex', 'regex', 0)
-            """,
-            (uuid.uuid4().hex, document_id, field["field_name"], field["field_value"], field["confidence"]),
-        )
-    return document_id
+    audit.record(conn, "document", document_id, "uploaded", actor=REVIEWER, detail={"filename": filename})
+    audit.record(conn, "document", document_id, "extracted", actor="system")
+
+    heat_row_id = uuid.uuid4().hex
+    reviewed_at = now_iso()
+    conn.execute(
+        """
+        INSERT INTO document_heats (
+            id, document_id, heat_id, alloy_composition_json, test_results_json, nonconformance_refs_json,
+            segregation_attested, segregation_attested_by, segregation_note, mass_kg, confidence,
+            source, extraction_source, flagged_for_review, flagged_reason, reviewed, reviewed_by, reviewed_at
+        ) VALUES (?, ?, ?, ?, NULL, '[]', ?, ?, ?, ?, 1.0, 'human', 'regex', 0, NULL, 1, ?, ?)
+        """,
+        (
+            heat_row_id,
+            document_id,
+            heat_label,
+            json.dumps(alloy_composition) if alloy_composition else None,
+            1 if segregation_attested else 0,
+            REVIEWER if segregation_attested else None,
+            segregation_note,
+            mass_kg,
+            REVIEWER,
+            reviewed_at,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO heat_sublots (id, heat_id, sublot_id, blend_pct, origin_country, origin_confidence, notes, flagged, flagged_reason)
+        VALUES (?, ?, NULL, 100.0, ?, 'high', 'domestically collected scrap, single source', 0, NULL)
+        """,
+        (uuid.uuid4().hex, heat_row_id, origin_country),
+    )
+    audit.record(conn, "document_heat", heat_row_id, "reviewed", actor=REVIEWER)
+    return heat_row_id
 
 
-def issue_credential(conn, issuer_id: str, private_key_path: str, credential_type: str, subject: dict,
-                      document_id: str | None, sources: list[str],
-                      segregation_attested: bool = False,
-                      segregation_attested_by: str | None = None,
-                      segregation_note: str | None = None) -> str:
+def issue_credential(
+    conn,
+    issuer_id: str,
+    private_key_path: str,
+    credential_type: str,
+    subject: dict,
+    heat_id: str | None,
+    sources: list[str],
+    segregation_attested: bool = False,
+    segregation_attested_by: str | None = None,
+    segregation_note: str | None = None,
+) -> str:
+    document_id = None
     document_content_hash = None
-    if document_id is not None:
-        doc = conn.execute("SELECT content_hash FROM documents WHERE id = ?", (document_id,)).fetchone()
-        document_content_hash = doc["content_hash"] if doc else None
+    if heat_id is not None:
+        heat = conn.execute("SELECT document_id FROM document_heats WHERE id = ?", (heat_id,)).fetchone()
+        if heat is not None:
+            document_id = heat["document_id"]
+            doc = conn.execute("SELECT content_hash FROM documents WHERE id = ?", (document_id,)).fetchone()
+            document_content_hash = doc["content_hash"] if doc else None
 
     credential_id = uuid.uuid4().hex
     issued_at = now_iso()
@@ -131,10 +185,13 @@ def issue_credential(conn, issuer_id: str, private_key_path: str, credential_typ
             document_id, document_content_hash, payload_hash, signature, issued_at,
         ),
     )
+    if heat_id is not None:
+        conn.execute("UPDATE document_heats SET credential_id = ? WHERE id = ?", (credential_id, heat_id))
     conn.execute(
         "INSERT INTO uii_bindings (id, credential_id, uii_code, created_at) VALUES (?, ?, ?, ?)",
         (uuid.uuid4().hex, credential_id, credential_id, issued_at),
     )
+    audit.record(conn, "credential", credential_id, "issued", actor=REVIEWER, detail={"credential_type": credential_type})
     return credential_id
 
 
@@ -175,9 +232,22 @@ def main() -> None:
         )
     conn.commit()
 
-    lot1_doc_id = seed_document(conn, issuer_id, SCRAP_LOT_1_TEXT)
-    lot2_doc_id = seed_document(conn, issuer_id, SCRAP_LOT_2_TEXT)
-    batch_doc_id = seed_document(conn, issuer_id, SINTERED_BATCH_TEXT)
+    lot1_heat_id = seed_document_with_heat(
+        conn, issuer_id, SCRAP_LOT_1_TEXT, "RGM-SCRAP-2026-0091", "United States", 410.0
+    )
+    lot2_heat_id = seed_document_with_heat(
+        conn, issuer_id, SCRAP_LOT_2_TEXT, "RGM-SCRAP-2026-0092", "United States", 165.0
+    )
+    batch_heat_id = seed_document_with_heat(
+        conn, issuer_id, SINTERED_BATCH_TEXT, "RGM-NDFEB-2026-0412", "United States", 182.5,
+        alloy_composition={"Nd": 29.5, "Fe": 68.2, "B": 1.0, "Dy": 1.3},
+        segregation_attested=True,
+        segregation_note=(
+            "Dedicated single-line sintering process; tooling purged and "
+            "lot-tagged between production runs; no shared feedstock with "
+            "non-domestic or non-qualifying material."
+        ),
+    )
     conn.commit()
 
     lot1_id = issue_credential(
@@ -189,7 +259,7 @@ def main() -> None:
             "heat_number": "RGM-SCRAP-2026-0091",
             "supplier_name": ISSUER_NAME,
         },
-        document_id=lot1_doc_id, sources=[],
+        heat_id=lot1_heat_id, sources=[],
     )
     lot2_id = issue_credential(
         conn, issuer_id, private_key_path, "collected_scrap_lot",
@@ -200,7 +270,7 @@ def main() -> None:
             "heat_number": "RGM-SCRAP-2026-0092",
             "supplier_name": ISSUER_NAME,
         },
-        document_id=lot2_doc_id, sources=[],
+        heat_id=lot2_heat_id, sources=[],
     )
     batch_id = issue_credential(
         conn, issuer_id, private_key_path, "sintered_ndfeb_batch",
@@ -211,7 +281,7 @@ def main() -> None:
             "heat_number": "RGM-NDFEB-2026-0412",
             "supplier_name": ISSUER_NAME,
         },
-        document_id=batch_doc_id, sources=[lot1_id, lot2_id],
+        heat_id=batch_heat_id, sources=[lot1_id, lot2_id],
         segregation_attested=True,
         segregation_attested_by=REVIEWER,
         segregation_note=(

@@ -3,8 +3,6 @@ spec calls for in section 4.1, standing in for S3 until a real pilot
 needs it. Narrow interface on purpose: swapping in a real S3 client later
 should only mean rewriting this one file, not any caller.
 """
-from pathlib import Path
-
 from db import DATA_DIR
 
 OBJECTS_DIR = DATA_DIR / "objects"

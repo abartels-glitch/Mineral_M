@@ -1,0 +1,13 @@
+[tool.ruff]
+# 160 rather than the 88/120 default — this codebase has long inline SQL
+# strings and test payload literals that aren't worth manually reflowing.
+line-length = 160
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection idiom is `param = Depends(get_db)` —
+# a function call in a default argument. That's the required pattern,
+# not the mutable-default-arg bug B008 normally flags.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.File", "fastapi.Form"]

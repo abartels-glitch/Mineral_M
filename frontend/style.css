@@ -171,3 +171,54 @@ pre {
 .field-row .conf.conf-low { color: var(--insufficient); }
 .field-row .conf.conf-none { color: var(--muted); font-weight: 400; }
 .field-row input[type=text] { margin-bottom: 0; }
+
+.heat-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+.heat-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+.heat-card-header h3 { margin: 0; font-size: 0.95rem; }
+
+.tag {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.tag-found { background: var(--pass-bg); color: var(--pass); }
+.tag-flagged { background: var(--insufficient-bg); color: var(--insufficient); }
+.tag-missing { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+
+.kv-editor { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem; align-items: flex-end; }
+.kv-editor .kv-row { display: flex; gap: 0.3rem; align-items: center; }
+.kv-editor input { width: 90px; margin-bottom: 0; }
+.kv-editor input.kv-key { width: 60px; }
+
+.editable-table input, .editable-table select {
+  margin-bottom: 0;
+  padding: 0.3rem;
+  font-size: 0.8rem;
+}
+.editable-table td { vertical-align: middle; }
+.editable-table tr.flagged-row { background: var(--insufficient-bg); }
+
+.icon-btn {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.8rem;
+  background: transparent;
+  color: var(--muted);
+}
+.icon-btn:hover { color: var(--text); }

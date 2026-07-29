@@ -27,10 +27,11 @@ CREATE TABLE IF NOT EXISTS documents (
     object_key TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     raw_text TEXT NOT NULL,
+    certificate_id TEXT,
+    supplier_id TEXT,
+    signatures_json TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'uploaded',
-    uploaded_at TEXT NOT NULL,
-    reviewed_by TEXT,
-    reviewed_at TEXT
+    uploaded_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS users (
@@ -50,15 +51,44 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS extracted_fields (
+-- One row per heat/melt on a certificate — a certificate can cover
+-- several heats (spec section 4.1's multi-heat consolidated case).
+-- `source` is the *current* value owner (flips to 'human' on review,
+-- same convention as the old extracted_fields table); `extraction_source`
+-- is written once and never touched again, so audit/stats can always
+-- answer "how was this originally extracted" even after review.
+CREATE TABLE IF NOT EXISTS document_heats (
     id TEXT PRIMARY KEY,
     document_id TEXT NOT NULL REFERENCES documents(id),
-    field_name TEXT NOT NULL,
-    field_value TEXT,
-    confidence REAL NOT NULL DEFAULT 1.0,
+    heat_id TEXT,
+    alloy_composition_json TEXT,
+    test_results_json TEXT,
+    nonconformance_refs_json TEXT NOT NULL DEFAULT '[]',
+    segregation_attested INTEGER NOT NULL DEFAULT 0,
+    segregation_attested_by TEXT,
+    segregation_note TEXT,
+    mass_kg REAL,
+    confidence REAL,
     source TEXT NOT NULL DEFAULT 'regex',
     extraction_source TEXT NOT NULL DEFAULT 'regex',
-    overridden_by_human INTEGER NOT NULL DEFAULT 0
+    flagged_for_review INTEGER NOT NULL DEFAULT 0,
+    flagged_reason TEXT,
+    reviewed INTEGER NOT NULL DEFAULT 0,
+    reviewed_by TEXT,
+    reviewed_at TEXT,
+    credential_id TEXT REFERENCES credentials(id)
+);
+
+CREATE TABLE IF NOT EXISTS heat_sublots (
+    id TEXT PRIMARY KEY,
+    heat_id TEXT NOT NULL REFERENCES document_heats(id),
+    sublot_id TEXT,
+    blend_pct REAL,
+    origin_country TEXT,
+    origin_confidence TEXT,
+    notes TEXT,
+    flagged INTEGER NOT NULL DEFAULT 0,
+    flagged_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS credentials (

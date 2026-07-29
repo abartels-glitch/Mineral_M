@@ -20,7 +20,7 @@ with a real design partner before a real pilot.
 | Decision | MVP call | Upgrade path |
 |---|---|---|
 | **Key custody** | Platform holds issuer private keys — one Ed25519 keypair per organization, unencrypted PEM under `data/keys/` | Move to supplier-held keys or HSM-backed platform custody before handling real supplier trust relationships |
-| **Document scope** | One document type: certificate of conformance / MTR (heat number, alloy composition, country-of-origin declaration, supplier ID) | Add document types once the first one is proven against a real sample |
+| **Document scope** | One document type: certificate of conformance / MTR. A certificate can cover one heat/melt (the common case) or several (a consolidated multi-heat certificate) — each heat is extracted, reviewed, and can become its own credential independently. Tightened after testing against `rio_grande_mtr_complex.pdf` (see below): single-heat is the working regression bar, multi-heat is the stretch target. | Add document *types* (not just heat counts) once the first one is proven against a real sample |
 | **Segregation enforcement** | Self-reported, but with a floor: `segregation_attested` (bool) + `segregation_attested_by` (named person) + `segregation_note` (control description). No third-party evidence yet. | Add evidence upload (photos, process logs) and eventually third-party audit |
 | **Materials scope** | Compliance engine only checks the actual DFARS rare-earth scope: samarium-cobalt magnets, NdFeB magnets, tantalum, tungsten. Anything else yields `insufficient_data`, not a silent pass. | Don't let product language ("motors, batteries, ESCs") outrun this without extending the engine first |
 
@@ -66,10 +66,37 @@ reset, no HTTPS enforcement (`secure=False` on the cookie — fine over
 local http, must flip before any real deployment), no self-registration/
 email verification.
 
+### Audit trail — what login actually buys you
+
+`buyer_auditor` used to exist with no real capability beyond what an
+anonymous visitor already gets from the public passport lookup. Rather
+than gate the public lookup behind login (worse for the "scan a part in
+the field" use case), logged-in users now get a second, additive layer:
+`GET /credentials/{id}/audit-trail` — who reviewed/issued the credential
+and when, plus (for document-backed credentials) the originating heat's
+full extraction/review detail: alloy composition, segregation
+attestation, and its sub-lot table with flagged/ok status per sub-lot.
+
+- `org_user`: only credentials their own org issued (403 across orgs,
+  same pattern as documents).
+- `buyer_auditor` / `platform_admin`: any credential, any org — this is
+  the actual point of the feature.
+- Surfaced on `passport.html` as an "Audit trail" section that only
+  appears for a logged-in session (`getCurrentUserOrNull()` in `app.js`
+  — a non-redirecting variant of `requireAuth()`, since this page must
+  stay fully public otherwise).
+
+This is also why `document_heats.source` and `.extraction_source` are two
+different columns: `source` reflects who currently owns the heat's data
+and gets overwritten to `human` on review, while `extraction_source` is
+written once at extraction time and never touched again — the audit
+trail needs the permanent one to answer "was this heat ever
+auto-extracted, and by which path."
+
 ## Document ingestion: object storage + two-step OCR/LLM extraction
 
-Real file storage and real structuring, replacing the original
-naive-UTF-8-decode-plus-regex placeholder.
+Real file storage and real per-heat structuring, replacing the original
+naive-UTF-8-decode-plus-flat-regex placeholder.
 
 - **Object storage** (`backend/storage.py`): local filesystem under
   `data/objects/`, standing in for S3 — spec section 4.1's "S3 or
@@ -87,30 +114,78 @@ naive-UTF-8-decode-plus-regex placeholder.
   Non-PDF uploads (e.g. the `.txt` demo samples) are decoded directly, as
   before.
 - **LLM structuring step** (`backend/llm_extractor.py`): the OCR text
-  goes to Claude (`claude-haiku-4-5-20251001`) via forced tool-use for
-  reliable structured output — same five fields as before, now with a
-  real per-field confidence score from the model instead of a fixed
-  placeholder. Chosen as two separate steps rather than one "LLM reads
-  the PDF directly" call specifically so there's a raw, non-LLM-derived
-  text artifact to check the model's structured output against — an
-  auditability property, not just extra plumbing.
-- **Confidence threshold**: fields below `0.7` render as "low
-  confidence — review carefully" (amber) in the reviewer UI instead of
-  looking identical to a clean extraction. Every document still requires
-  review regardless of confidence — this changes what the reviewer
-  notices, not whether review happens.
+  goes to Claude (`claude-haiku-4-5-20251001`) via forced tool-use,
+  targeting a **per-heat** schema — a certificate can cover multiple
+  heats/melts, each with its own alloy composition, test results, and a
+  table of blended feedstock sub-lots (sub-lot id, blend %, origin
+  country, origin confidence). The model is told explicitly to return
+  `null` rather than guess, and to flag a heat (`flagged_for_review`)
+  when a sub-lot's origin is unconfirmed, contradictory, or a covered
+  country appears anywhere in its table. `main.py` additionally
+  re-checks every sub-lot deterministically against `passport.py`'s own
+  banned-country list, so a heat gets flagged even if the model's
+  own judgment misses it — belt-and-suspenders, not just LLM say-so.
+  Two separate steps rather than one "LLM reads the PDF directly" call
+  specifically so there's a raw, non-LLM-derived text artifact to check
+  the model's structured output against — an auditability property, not
+  just extra plumbing.
+- **Three-state review UI, not two**: every field is found / not found /
+  **flagged** — flagged is distinct from not-found and never collapses
+  into it, per the spec's explicit requirement not to let a buried
+  compliance problem (e.g. a covered-country sub-lot) get missed by a
+  reviewer skimming a "not found" list. Every document still requires
+  review regardless — this changes what the reviewer notices, not
+  whether review happens.
 - **Fallback**: if `ANTHROPIC_API_KEY` is unset or the API call fails for
-  any reason, extraction falls back to the original regex extractor —
-  logged, not silent, and uploads never 500 because of it. This is also
-  what keeps `pytest` fully offline; no live API calls in the test suite.
-- **Extraction accuracy tracking**: `extracted_fields.extraction_source`
-  permanently records which path produced a field (`llm`/`regex`/`human`
-  for reviewer-added fields) — separate from the `source` column, which
-  reflects the *current* value owner and gets overwritten to `human` on
-  every review. `GET /admin/extraction-stats` (`platform_admin` only)
-  aggregates override rate overall and per field — the spec's "track how
-  often humans override the model" bullet, built on data the schema
-  already captured rather than new tracking machinery.
+  any reason, extraction falls back to the original regex extractor
+  (`extractor.py`, unchanged) — but it can only ever produce **one**
+  heat with no composition/sub-lot data, wrapped as explicitly
+  `flagged_for_review`. Honest about what regex was never meant to
+  do, rather than silently producing a clean-looking result. This is
+  also what keeps `pytest` fully offline; no live API calls in the test
+  suite.
+- **Extraction accuracy tracking**: `document_heats.extraction_source`
+  permanently records which path produced a heat (`llm`/`regex`) —
+  separate from `source`, which reflects the *current* value owner and
+  gets overwritten to `human` on review. `GET /admin/extraction-stats`
+  (`platform_admin` only) reports flagged-rate and reviewed-count per
+  extraction path. Simplified from the original flat-field version: with
+  nested composition/sub-lot data, "did the reviewer change anything" is
+  no longer a single yes/no per field, so this reports flagged-rate (a
+  proxy for extraction difficulty) rather than an exact override diff —
+  a documented simplification, not a silent scope cut.
+
+### Sample fixtures + the regression/stretch bar
+
+`backend/tests/fixtures/` — built with PyMuPDF, referenced by
+`BUILD_SPEC.md` directly:
+
+- `rio_grande_mtr_sample.pdf` — one clean heat, no sub-lots. The
+  regression bar: must extract cleanly (heat id, composition, mass) on
+  every change to the extraction pipeline.
+- `rio_grande_mtr_complex.pdf` — three heats; one has a low-confidence
+  "unconfirmed" sub-lot, another has a sub-lot from a covered country
+  (China). The stretch target. **Without an API key**, the regex
+  fallback (as documented above) only ever captures one flagged heat out
+  of the three real ones — the correct, honest baseline to improve on
+  once a real LLM key is exercised against it, not a bug.
+
+### Credential issuance is per-heat
+
+Each heat becomes its own issuable credential (`POST
+/credentials/issue` takes `heat_id`, not `document_id`) — matches how
+"heat" already functions as the batch/lot unit elsewhere, and means one
+bad heat on a multi-heat certificate doesn't block or entangle the
+others. A heat must be reviewed first, and can only be issued once
+(`document_heats.credential_id` is 1:1). The credential's `subject` is
+still a flat `{material_type, origin_country, mass_kg, ...}`, reviewer-
+confirmed from the heat's richer data at issuance time — deliberately:
+`passport.py`'s compliance checks read single scalar values, and making
+them sub-lot-aware (a heat can genuinely blend multiple origin
+countries) is explicitly a **later** item per the spec itself (4.4:
+"generalize the graph walk... once mass-balance fields exist"). So
+`passport.py`, `crypto_utils.py`, PDF export, and UII/scanning are all
+unchanged by this — only extraction, review, and issuance-linkage are.
 
 ### Setting the API key
 
@@ -150,13 +225,20 @@ silently assumed:
   that's its own numbering standard. Scanning it resolves straight to
   the passport view, which is the actual behavior the spec cares about.
 
-`frontend/scan.html` does camera-based scanning via a vendored copy of
-[ZXing](https://github.com/zxing-js/library) (`frontend/vendor/zxing.min.js`
-— pulled via `npm install` and copied in, not loaded from a CDN, to keep
-the frontend self-contained like the rest of it). **This has not been
-tested against a live camera in this environment** — no camera hardware
-here. It's built against ZXing's documented `BrowserMultiFormatReader`
-API; verify it yourself with a real device before relying on it.
+`frontend/scan.html` resolves a scan via **device photo upload**, not a
+live in-browser camera stream: `<input type="file" accept="image/*"
+capture="environment">` opens the camera directly on a phone (or a file
+picker on desktop), and decoding happens client-side via a vendored copy
+of [ZXing](https://github.com/zxing-js/library)
+(`frontend/vendor/zxing.min.js` — pulled via `npm install` and copied
+in, not loaded from a CDN, to keep the frontend self-contained). The
+photo is never sent to the server. Chosen over live camera streaming
+both because it's better real-world UX (snap a photo of a part's label,
+no fumbling a live viewfinder) and because it's actually verifiable
+here — unlike a live camera feed, a static-image decode was tested
+end-to-end with Playwright: a real generated Data Matrix resolves to its
+passport correctly, and an image with no code shows a clean error
+instead of hanging.
 
 ## PDF export
 
@@ -168,9 +250,13 @@ endpoint, just a different rendering of the same data. Linked from
 ## Data model
 
 SQLite (`backend/db.py`): `issuers` (doubles as the organizations table),
-`documents` (`org_id`-scoped, now with `object_key`/`content_hash`),
-`extracted_fields` (with `extraction_source`, see above), `credentials`
-(graph-native via a `sources_json` array, not a single parent, now with
+`documents` (`org_id`-scoped, `object_key`/`content_hash`,
+`certificate_id`/`supplier_id`/`signatures_json`), `document_heats` (one
+row per heat/melt on a certificate — composition, test results,
+segregation, `extraction_source`/`source`, `flagged_for_review`,
+`reviewed`, `credential_id` once issued), `heat_sublots` (one row per
+feedstock sub-lot — origin, confidence, `flagged`), `credentials`
+(graph-native via a `sources_json` array, not a single parent, with
 `document_content_hash`), `uii_bindings`, `audit_log`, `users`,
 `sessions`. `credentials` also carries `superseded_by` / `revoked_at` and
 the segregation-attestation fields — added early because retrofitting
@@ -208,13 +294,31 @@ credentials/services, or are substantial standalone efforts:
   a cloud OCR service — blocked on this environment having no package
   manager to install Tesseract; PyMuPDF's text-layer extraction covers
   digitally-generated PDFs only, see above)
+- Sub-lot-aware compliance checking — a heat's sub-lot table is captured
+  and flagged for human review, but the passport compiler still checks
+  one flat `origin_country`/`material_type` per credential (the reviewer
+  confirms these at issuance). Mass-balance/partial-quantity fields
+  (spec section 3) need to exist first — explicitly a later item per the
+  spec's own sequencing (4.4), not an oversight here.
+- Parts/products table with stable part identity independent of which
+  credential currently represents it (spec section 3) — every credential
+  still gets a UII today regardless of this gap, see the UII section.
 - Real W3C Verifiable Credentials library (currently raw Ed25519 —
   additive swap given the current payload shape)
-- Live-camera testing of `scan.html` (see UII section above — no camera
-  hardware in this environment)
 - A formal MIL-STD-130 IUID numbering scheme (currently the Data Matrix
   encodes a passport URL, not a compliant IUID string)
-- Real S3 (currently local-filesystem `storage.py`) + Postgres + CI
+- **Real S3 and Postgres — deliberately deferred, not blocked.** This is
+  hosted locally for now; both are a "when this actually deploys
+  somewhere with concurrent users" concern, not a local-dev one. SQLite
+  handles moderate concurrent access fine, and `storage.py`'s narrow
+  interface makes the S3 swap easy whenever it's actually needed. Site
+  security (auth hardening, HTTPS enforcement, secrets management) is
+  the real gate before shipping to any client — noted throughout this
+  doc wherever it applies, not deferred to "later" vaguely.
+
+CI (`.github/workflows/ci.yml`) is written and verified — full fresh-
+environment simulation (install, lint, test) passes — but not yet
+confirmed on a live GitHub Actions run since it hasn't been pushed.
 
 Also out of scope per spec section 5: zero-knowledge proofs, PUF/NFC
 hardware tags, FedRAMP/CMMC authorization, marketplace mechanics, ERP
@@ -222,7 +326,9 @@ push-integrations.
 
 ## Suggested next step
 
-Per the spec's own build order: get one *real* document from an actual
-candidate design partner through this extraction pipeline, even with the
-regex placeholder, before investing further — it'll tell you how far off
-the field patterns and schema assumptions are.
+The synthetic sample PDFs get the extraction pipeline exercised end-to-
+end, but they're still synthetic — per the spec's own build order, get
+one *real* document from an actual candidate design partner through this
+pipeline before investing further. It'll tell you how far off the
+label-variant handling, composition parsing, and sub-lot table
+assumptions actually are against a real certificate's real layout.
