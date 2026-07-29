@@ -14,6 +14,7 @@ class FakeToolUseBlock:
 class FakeResponse:
     def __init__(self, content):
         self.content = content
+        self.usage = types.SimpleNamespace(input_tokens=100, output_tokens=50)
 
 
 def _fake_client(response=None, raises=None):
@@ -36,8 +37,7 @@ def _heat(**overrides):
         "segregation_note": "Dedicated line.",
         "mass_kg": 100.0,
         "confidence": 0.95,
-        "flagged_for_review": False,
-        "flagged_reason": None,
+        "flags": [],
     }
     heat.update(overrides)
     return heat
@@ -61,7 +61,7 @@ def test_extract_structured_success_single_heat(monkeypatch):
     assert heat["source"] == "llm"
     assert heat["heat_id"] == "H-1"
     assert heat["alloy_composition"] == {"Nd": 29.5, "Fe": 68.2, "B": 1.0}
-    assert heat["flagged_for_review"] is False
+    assert heat["flags"] == []
 
 
 def test_extract_structured_multi_heat_with_flagged_sublot(monkeypatch):
@@ -69,8 +69,15 @@ def test_extract_structured_multi_heat_with_flagged_sublot(monkeypatch):
     clean_heat = _heat(heat_id="H-1")
     flagged_heat = _heat(
         heat_id="H-2",
-        flagged_for_review=True,
-        flagged_reason="covered-country sub-lot present",
+        # Raw shape as the LLM's tool_use.input would carry it — no
+        # severity/source yet, those are added by extract_structured.
+        flags=[
+            {
+                "issue_type": "compliance_violation",
+                "field_name": "origin_country",
+                "human_readable_reason": "covered-country sub-lot present",
+            }
+        ],
         feedstock_sublots=[
             {"sublot_id": "S1", "blend_pct": 80.0, "origin_country": "United States", "origin_confidence": "high", "notes": None},
             {"sublot_id": "S2", "blend_pct": 20.0, "origin_country": "China", "origin_confidence": "high", "notes": "broker-sourced"},
@@ -83,8 +90,12 @@ def test_extract_structured_multi_heat_with_flagged_sublot(monkeypatch):
     result = llm_extractor.extract_structured("some raw text")
 
     assert len(result["heats"]) == 2
-    assert result["heats"][0]["flagged_for_review"] is False
-    assert result["heats"][1]["flagged_for_review"] is True
+    assert result["heats"][0]["flags"] == []
+    flag = result["heats"][1]["flags"][0]
+    assert flag["issue_type"] == "compliance_violation"
+    assert flag["field_name"] == "origin_country"
+    assert flag["severity"] == "blocking"  # derived from issue_type, not trusted from the model
+    assert flag["source"] == "extraction"
     assert len(result["heats"][1]["feedstock_sublots"]) == 2
 
 
@@ -103,7 +114,10 @@ def test_falls_back_to_regex_when_api_key_missing(monkeypatch):
     assert heat["source"] == "regex"
     assert heat["heat_id"] == "X-1"
     assert heat["alloy_composition"] is None
-    assert heat["flagged_for_review"] is True
+    assert len(heat["flags"]) == 1
+    assert heat["flags"][0]["issue_type"] == "low_confidence_extraction"
+    assert heat["flags"][0]["severity"] == "needs_review"
+    assert heat["flags"][0]["source"] == "extraction"
     assert heat["feedstock_sublots"] == [
         {
             "sublot_id": None,
@@ -123,7 +137,7 @@ def test_falls_back_to_regex_on_api_error(monkeypatch):
 
     result = llm_extractor.extract_structured("Supplier: X\n")
     assert result["heats"][0]["source"] == "regex"
-    assert result["heats"][0]["flagged_for_review"] is True
+    assert len(result["heats"][0]["flags"]) == 1
 
 
 def test_falls_back_when_response_has_no_tool_use_block(monkeypatch):

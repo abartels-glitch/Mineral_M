@@ -3,6 +3,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel
 
+from review_flags import Flag
+
 
 class SublotOut(BaseModel):
     id: str
@@ -12,7 +14,7 @@ class SublotOut(BaseModel):
     origin_confidence: Optional[str]
     notes: Optional[str]
     flagged: bool
-    flagged_reason: Optional[str]
+    flags: list[Flag]
 
 
 class HeatOut(BaseModel):
@@ -30,7 +32,7 @@ class HeatOut(BaseModel):
     source: str
     extraction_source: str
     flagged_for_review: bool
-    flagged_reason: Optional[str]
+    flags: list[Flag]
     reviewed: bool
     reviewed_by: Optional[str]
     reviewed_at: Optional[str]

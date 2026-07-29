@@ -107,8 +107,8 @@ def seed_document_with_heat(
         INSERT INTO document_heats (
             id, document_id, heat_id, alloy_composition_json, test_results_json, nonconformance_refs_json,
             segregation_attested, segregation_attested_by, segregation_note, mass_kg, confidence,
-            source, extraction_source, flagged_for_review, flagged_reason, reviewed, reviewed_by, reviewed_at
-        ) VALUES (?, ?, ?, ?, NULL, '[]', ?, ?, ?, ?, 1.0, 'human', 'regex', 0, NULL, 1, ?, ?)
+            source, extraction_source, flagged_for_review, flags_json, reviewed, reviewed_by, reviewed_at
+        ) VALUES (?, ?, ?, ?, NULL, '[]', ?, ?, ?, ?, 1.0, 'human', 'regex', 0, '[]', 1, ?, ?)
         """,
         (
             heat_row_id,
@@ -125,8 +125,8 @@ def seed_document_with_heat(
     )
     conn.execute(
         """
-        INSERT INTO heat_sublots (id, heat_id, sublot_id, blend_pct, origin_country, origin_confidence, notes, flagged, flagged_reason)
-        VALUES (?, ?, NULL, 100.0, ?, 'high', 'domestically collected scrap, single source', 0, NULL)
+        INSERT INTO heat_sublots (id, heat_id, sublot_id, blend_pct, origin_country, origin_confidence, notes, flagged, flags_json)
+        VALUES (?, ?, NULL, 100.0, ?, 'high', 'domestically collected scrap, single source', 0, '[]')
         """,
         (uuid.uuid4().hex, heat_row_id, origin_country),
     )

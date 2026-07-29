@@ -21,6 +21,7 @@ import os
 import anthropic
 
 import extractor
+import review_flags
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,29 @@ SUBLOT_SCHEMA = {
         "notes": {"type": ["string", "null"]},
     },
     "required": ["sublot_id", "blend_pct", "origin_country", "origin_confidence", "notes"],
+}
+
+FLAG_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "issue_type": {
+            "type": "string",
+            "enum": list(review_flags.ISSUE_TYPES),
+            "description": (
+                "missing_field: a value the certificate should have isn't present. "
+                "ambiguous_field: text is present but hedged/unclear. "
+                "inconsistent_data: two stated values contradict each other. "
+                "compliance_violation: a covered country appears as an origin. "
+                "low_confidence_extraction: an origin is unconfirmed or its confidence is low."
+            ),
+        },
+        "field_name": {
+            "type": ["string", "null"],
+            "description": "The specific field this issue concerns, e.g. 'heat_id', 'origin_country'. Null if not about one specific field.",
+        },
+        "human_readable_reason": {"type": "string", "description": "Plain-language explanation for a human reviewer."},
+    },
+    "required": ["issue_type", "field_name", "human_readable_reason"],
 }
 
 HEAT_SCHEMA = {
@@ -92,15 +116,20 @@ HEAT_SCHEMA = {
                 "hedged language, contradictions, or missing data."
             ),
         },
-        "flagged_for_review": {
-            "type": "boolean",
+        "flags": {
+            "type": "array",
+            "items": FLAG_SCHEMA,
             "description": (
-                f"true if any sub-lot origin is unconfirmed/low-confidence, contradictory, or a "
-                f"covered country ({BANNED_ORIGIN_COUNTRIES_HINT}) appears anywhere in this heat's "
-                "sub-lot table — this is a human-review signal, not a compliance verdict."
+                "One entry per distinct issue you notice in this heat's data: a missing field, "
+                "hedged/ambiguous text, internally inconsistent values, a covered country "
+                f"({BANNED_ORIGIN_COUNTRIES_HINT}) appearing as an origin anywhere in the sub-lot "
+                "table, or a sub-lot with unconfirmed/low-confidence origin data. Empty array if "
+                "the heat's data is clean. Don't fold multiple distinct issues into one entry, and "
+                "don't let a compliance-sensitive fact (e.g. a covered-country origin) change how "
+                "confident you are in the data — that's a separate signal, tracked here, not in "
+                "`confidence`."
             ),
         },
-        "flagged_reason": {"type": ["string", "null"], "description": "Why flagged_for_review is true; null otherwise."},
     },
     "required": [
         "heat_id",
@@ -112,8 +141,7 @@ HEAT_SCHEMA = {
         "segregation_note",
         "mass_kg",
         "confidence",
-        "flagged_for_review",
-        "flagged_reason",
+        "flags",
     ],
 }
 
@@ -160,10 +188,13 @@ SYSTEM_PROMPT = (
     "should only drop when the text itself is genuinely ambiguous, hedged ('unconfirmed', "
     "'pending documentation', 'possibly'), contradictory, or absent. Do not let a compliance-"
     "sensitive answer lower your confidence in what the text plainly says.\n\n"
-    f"Flag a heat for review if any feedstock sub-lot has an unconfirmed or low-confidence origin, "
-    f"contradictory origin data, or a covered country ({BANNED_ORIGIN_COUNTRIES_HINT}) anywhere in "
-    "its sub-lot table — flagging for review is separate from confidence: a plainly-stated "
-    "covered-country origin is both HIGH confidence and flagged for review at the same time."
+    "Record every distinct issue you notice as its own entry in `flags`, classified by the "
+    f"closest issue_type: a covered country ({BANNED_ORIGIN_COUNTRIES_HINT}) appearing anywhere in "
+    "the sub-lot table is compliance_violation; an unconfirmed or low-confidence origin is "
+    "low_confidence_extraction; a value that should be present but isn't is missing_field; "
+    "internally contradictory values are inconsistent_data; anything else hedged or unclear is "
+    "ambiguous_field. Flagging is separate from confidence: a plainly-stated covered-country "
+    "origin is both HIGH confidence and a compliance_violation flag at the same time."
 )
 
 RETRYABLE_ERRORS = (anthropic.APIError, RuntimeError, KeyError, ValueError, TypeError)
@@ -229,8 +260,13 @@ def _regex_fallback(raw_text: str) -> dict:
         "segregation_note": None,
         "mass_kg": mass_kg,
         "confidence": 0.5 if flat.get("heat_number") else 0.0,
-        "flagged_for_review": True,
-        "flagged_reason": "regex fallback — composition and sub-lot data not parsed, needs full manual review",
+        "flags": [
+            review_flags.make_flag(
+                "low_confidence_extraction",
+                "regex fallback — composition and sub-lot data not parsed, needs full manual review",
+                source="extraction",
+            ).model_dump()
+        ],
         "source": "regex",
     }
     return {
@@ -245,11 +281,24 @@ def extract_structured(raw_text: str) -> dict:
     """Returns {certificate_id, supplier_id, signatures, heats: [...]} —
     each heat dict carries a `source` key ('llm' on a successful model
     call, 'regex' when it fell back) so callers can record which path
-    actually produced it."""
+    actually produced it, and a `flags` list of structured review_flags.Flag
+    dicts (source='extraction') built from the model's raw issue_type/
+    field_name/human_readable_reason entries — severity is derived here,
+    not trusted to the model, so it's always consistent with issue_type."""
     try:
         result = _call_llm(raw_text)
         for heat in result["heats"]:
             heat["source"] = "llm"
+            raw_flags = heat.pop("flags", []) or []
+            heat["flags"] = [
+                review_flags.make_flag(
+                    issue_type=f["issue_type"],
+                    human_readable_reason=f["human_readable_reason"],
+                    source="extraction",
+                    field_name=f.get("field_name"),
+                ).model_dump()
+                for f in raw_flags
+            ]
         return result
     except RETRYABLE_ERRORS as exc:
         logger.warning("LLM extraction failed (%s), falling back to regex extractor", exc)

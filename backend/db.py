@@ -4,6 +4,7 @@ Deliberately SQLite for now — section 4.8 of the build spec calls for a
 Postgres migration once the pilot needs concurrent writers, but that's not
 yet.
 """
+import json
 import sqlite3
 from pathlib import Path
 
@@ -72,7 +73,7 @@ CREATE TABLE IF NOT EXISTS document_heats (
     source TEXT NOT NULL DEFAULT 'regex',
     extraction_source TEXT NOT NULL DEFAULT 'regex',
     flagged_for_review INTEGER NOT NULL DEFAULT 0,
-    flagged_reason TEXT,
+    flags_json TEXT NOT NULL DEFAULT '[]',
     reviewed INTEGER NOT NULL DEFAULT 0,
     reviewed_by TEXT,
     reviewed_at TEXT,
@@ -88,7 +89,7 @@ CREATE TABLE IF NOT EXISTS heat_sublots (
     origin_confidence TEXT,
     notes TEXT,
     flagged INTEGER NOT NULL DEFAULT 0,
-    flagged_reason TEXT
+    flags_json TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS credentials (
@@ -136,10 +137,70 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+def _classify_legacy_reason(text: str) -> tuple:
+    """Best-effort classification of a pre-migration flat reason string
+    into (issue_type, field_name, source). The three deterministic
+    phrasings below are known verbatim from main.py's old
+    `_evaluate_sublot_flag` and can be classified exactly; anything else
+    is an LLM-authored free-text reason (source='extraction'), keyword-
+    matched onto the closest issue_type since we can't recover which
+    field, if any, the model meant."""
+    lower = text.lower()
+    if "is feoc-covered" in lower:
+        return "compliance_violation", "origin_country", "compliance_engine"
+    if "origin country not stated" in lower:
+        return "missing_field", "origin_country", "compliance_engine"
+    if "origin confidence marked low" in lower:
+        return "low_confidence_extraction", "origin_confidence", "compliance_engine"
+    if "regex fallback" in lower:
+        return "low_confidence_extraction", None, "extraction"
+    if "covered country" in lower or "feoc" in lower:
+        return "compliance_violation", None, "extraction"
+    if "unconfirmed" in lower or "low-confidence" in lower or "low confidence" in lower:
+        return "low_confidence_extraction", None, "extraction"
+    if "inconsistent" in lower or "contradictory" in lower:
+        return "inconsistent_data", None, "extraction"
+    if "missing" in lower or "not stated" in lower or "not present" in lower:
+        return "missing_field", None, "extraction"
+    return "ambiguous_field", None, "extraction"
+
+
+def _migrate_flags_json(conn: sqlite3.Connection) -> None:
+    """CREATE TABLE IF NOT EXISTS doesn't touch a table that already
+    exists on disk, so the flagged_reason -> flags_json rename (see
+    review_flags.py) needs an explicit migration for any dev DB created
+    before that change. A legacy flagged_reason could itself be several
+    reasons joined with "; " (main.py's old dedupe-join), so each
+    segment becomes its own classified flag rather than one blob. New
+    rows never hit this path since they're written with flags_json
+    directly."""
+    for table in ("document_heats", "heat_sublots"):
+        cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if "flags_json" not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN flags_json TEXT NOT NULL DEFAULT '[]'")
+        if "flagged_reason" in cols:
+            for row in conn.execute(f"SELECT id, flagged_reason FROM {table} WHERE flagged_reason IS NOT NULL"):
+                new_flags = []
+                for segment in row["flagged_reason"].split("; "):
+                    issue_type, field_name, source = _classify_legacy_reason(segment)
+                    new_flags.append(
+                        {
+                            "issue_type": issue_type,
+                            "field_name": field_name,
+                            "severity": "blocking" if issue_type == "compliance_violation" else "needs_review",
+                            "human_readable_reason": segment,
+                            "source": source,
+                        }
+                    )
+                conn.execute(f"UPDATE {table} SET flags_json = ? WHERE id = ?", (json.dumps(new_flags), row["id"]))
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN flagged_reason")
+
+
 def init_db() -> None:
     conn = get_connection()
     try:
         conn.executescript(SCHEMA)
+        _migrate_flags_json(conn)
         conn.commit()
     finally:
         conn.close()

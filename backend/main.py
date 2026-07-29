@@ -28,6 +28,7 @@ import llm_extractor
 import ocr
 import passport as passport_engine
 import pdf_export
+import review_flags
 import storage
 import uii
 from db import get_db, init_db
@@ -57,18 +58,38 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _evaluate_sublot_flag(sublot: dict) -> tuple[bool, str | None]:
+def _evaluate_sublot_flag(sublot: dict) -> list[dict]:
     """Deterministic sub-lot flagging, reusing passport.py's own banned-
     country list so extraction-time flagging and the compliance engine
-    never disagree about what counts as covered."""
+    never disagree about what counts as covered. Returns structured
+    review_flags.Flag dicts (source='compliance_engine') rather than a
+    bare reason string — same rules as before, just structured output."""
     origin = (sublot.get("origin_country") or "").strip()
     if not origin:
-        return True, "origin country not stated"
+        return [
+            review_flags.make_flag(
+                "missing_field", "origin country not stated", source="compliance_engine", field_name="origin_country"
+            ).model_dump()
+        ]
     if origin.lower() in passport_engine.BANNED_ORIGIN_COUNTRIES:
-        return True, f"origin country '{origin}' is FEOC-covered"
+        return [
+            review_flags.make_flag(
+                "compliance_violation",
+                f"origin country '{origin}' is FEOC-covered",
+                source="compliance_engine",
+                field_name="origin_country",
+            ).model_dump()
+        ]
     if (sublot.get("origin_confidence") or "").lower() == "low":
-        return True, "origin confidence marked low"
-    return False, None
+        return [
+            review_flags.make_flag(
+                "low_confidence_extraction",
+                "origin confidence marked low",
+                source="compliance_engine",
+                field_name="origin_confidence",
+            ).model_dump()
+        ]
+    return []
 
 
 def _row_to_sublot(row) -> SublotOut:
@@ -80,7 +101,7 @@ def _row_to_sublot(row) -> SublotOut:
         origin_confidence=row["origin_confidence"],
         notes=row["notes"],
         flagged=bool(row["flagged"]),
-        flagged_reason=row["flagged_reason"],
+        flags=json.loads(row["flags_json"]),
     )
 
 
@@ -105,7 +126,7 @@ def _row_to_heat(conn, row) -> HeatOut:
         source=row["source"],
         extraction_source=row["extraction_source"],
         flagged_for_review=bool(row["flagged_for_review"]),
-        flagged_reason=row["flagged_reason"],
+        flags=json.loads(row["flags_json"]),
         reviewed=bool(row["reviewed"]),
         reviewed_by=row["reviewed_by"],
         reviewed_at=row["reviewed_at"],
@@ -266,13 +287,10 @@ async def upload_document(
 
     for heat in structured["heats"]:
         sublots = heat.get("feedstock_sublots") or []
-        sublot_flags = [_evaluate_sublot_flag(s) for s in sublots]
-        heat_flagged = bool(heat.get("flagged_for_review")) or any(f for f, _ in sublot_flags)
-        reasons = []
-        if heat.get("flagged_for_review") and heat.get("flagged_reason"):
-            reasons.append(heat["flagged_reason"])
-        reasons.extend(reason for flagged, reason in sublot_flags if flagged and reason)
-        heat_flagged_reason = "; ".join(dict.fromkeys(reasons)) or None  # dedupe, preserve order
+        sublot_flag_lists = [_evaluate_sublot_flag(s) for s in sublots]  # list[list[dict]], compliance_engine
+        extraction_flags = heat.get("flags") or []  # source='extraction', from the LLM/regex path
+        heat_flags = extraction_flags + [f for flist in sublot_flag_lists for f in flist]
+        heat_flagged = bool(heat_flags)
 
         heat_row_id = uuid.uuid4().hex
         conn.execute(
@@ -280,7 +298,7 @@ async def upload_document(
             INSERT INTO document_heats (
                 id, document_id, heat_id, alloy_composition_json, test_results_json, nonconformance_refs_json,
                 segregation_attested, segregation_attested_by, segregation_note, mass_kg, confidence,
-                source, extraction_source, flagged_for_review, flagged_reason, reviewed
+                source, extraction_source, flagged_for_review, flags_json, reviewed
             ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 0)
             """,
             (
@@ -294,19 +312,19 @@ async def upload_document(
                 heat.get("confidence"),
                 heat["source"], heat["source"],
                 1 if heat_flagged else 0,
-                heat_flagged_reason,
+                json.dumps(heat_flags),
             ),
         )
-        for sublot, (flagged, reason) in zip(sublots, sublot_flags, strict=True):
+        for sublot, sublot_flags in zip(sublots, sublot_flag_lists, strict=True):
             conn.execute(
                 """
-                INSERT INTO heat_sublots (id, heat_id, sublot_id, blend_pct, origin_country, origin_confidence, notes, flagged, flagged_reason)
+                INSERT INTO heat_sublots (id, heat_id, sublot_id, blend_pct, origin_country, origin_confidence, notes, flagged, flags_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     uuid.uuid4().hex, heat_row_id, sublot.get("sublot_id"), sublot.get("blend_pct"),
                     sublot.get("origin_country"), sublot.get("origin_confidence"), sublot.get("notes"),
-                    1 if flagged else 0, reason,
+                    1 if sublot_flags else 0, json.dumps(sublot_flags),
                 ),
             )
     conn.commit()
@@ -382,9 +400,9 @@ def review_heat(
         raise HTTPException(409, "heat already reviewed; a new review cycle is required to change it")
 
     sublot_dicts = [s.model_dump() for s in body.sublots]
-    sublot_flags = [_evaluate_sublot_flag(s) for s in sublot_dicts]
-    still_flagged = any(f for f, _ in sublot_flags)
-    flagged_reason = "; ".join(dict.fromkeys(r for f, r in sublot_flags if f and r)) or None
+    sublot_flag_lists = [_evaluate_sublot_flag(s) for s in sublot_dicts]
+    heat_flags = [f for flist in sublot_flag_lists for f in flist]
+    still_flagged = bool(heat_flags)
 
     reviewed_at = now_iso()
     conn.execute(
@@ -392,7 +410,7 @@ def review_heat(
         UPDATE document_heats
         SET heat_id = ?, alloy_composition_json = ?, test_results_json = ?, nonconformance_refs_json = ?,
             segregation_attested = ?, segregation_attested_by = ?, segregation_note = ?, mass_kg = ?,
-            source = 'human', flagged_for_review = ?, flagged_reason = ?,
+            source = 'human', flagged_for_review = ?, flags_json = ?,
             reviewed = 1, reviewed_by = ?, reviewed_at = ?
         WHERE id = ?
         """,
@@ -406,23 +424,23 @@ def review_heat(
             body.segregation_note,
             body.mass_kg,
             1 if still_flagged else 0,
-            flagged_reason,
+            json.dumps(heat_flags),
             current_user["email"],
             reviewed_at,
             heat_id,
         ),
     )
     conn.execute("DELETE FROM heat_sublots WHERE heat_id = ?", (heat_id,))
-    for sublot, (flagged, reason) in zip(sublot_dicts, sublot_flags, strict=True):
+    for sublot, sublot_flags in zip(sublot_dicts, sublot_flag_lists, strict=True):
         conn.execute(
             """
-            INSERT INTO heat_sublots (id, heat_id, sublot_id, blend_pct, origin_country, origin_confidence, notes, flagged, flagged_reason)
+            INSERT INTO heat_sublots (id, heat_id, sublot_id, blend_pct, origin_country, origin_confidence, notes, flagged, flags_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 uuid.uuid4().hex, heat_id, sublot["sublot_id"], sublot["blend_pct"],
                 sublot["origin_country"], sublot["origin_confidence"], sublot["notes"],
-                1 if flagged else 0, reason,
+                1 if sublot_flags else 0, json.dumps(sublot_flags),
             ),
         )
     conn.commit()

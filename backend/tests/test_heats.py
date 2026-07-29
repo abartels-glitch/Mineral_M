@@ -112,6 +112,14 @@ def test_upload_extraction_falls_back_to_one_flagged_heat(client, conn):
     assert heat["extraction_source"] == "regex"
     assert heat["flagged_for_review"] is True
     assert heat["reviewed"] is False
+    # One flag from the regex fallback itself (source='extraction'), one
+    # from the deterministic sub-lot check on its always-low-confidence
+    # origin note (source='compliance_engine') — the two layers agree
+    # independently rather than one just echoing the other.
+    assert len(heat["flags"]) == 2
+    assert {f["source"] for f in heat["flags"]} == {"extraction", "compliance_engine"}
+    extraction_flag = next(f for f in heat["flags"] if f["source"] == "extraction")
+    assert extraction_flag["issue_type"] == "low_confidence_extraction"
     assert len(heat["sublots"]) == 1
     assert heat["sublots"][0]["origin_country"] == "United States"
 
@@ -139,8 +147,7 @@ def test_upload_with_mocked_multi_heat_flagged_sublot(client, conn, monkeypatch)
                     "segregation_note": "Dedicated line.",
                     "mass_kg": 210.0,
                     "confidence": 0.9,
-                    "flagged_for_review": False,
-                    "flagged_reason": None,
+                    "flags": [],
                     "source": "llm",
                 },
                 {
@@ -156,8 +163,7 @@ def test_upload_with_mocked_multi_heat_flagged_sublot(client, conn, monkeypatch)
                     "segregation_note": "Dedicated line; broker addition per C2.",
                     "mass_kg": 120.0,
                     "confidence": 0.9,
-                    "flagged_for_review": False,
-                    "flagged_reason": None,
+                    "flags": [],
                     "source": "llm",
                 },
             ],
@@ -174,13 +180,18 @@ def test_upload_with_mocked_multi_heat_flagged_sublot(client, conn, monkeypatch)
     heat2 = next(h for h in body["heats"] if h["heat_id"] == "H-2")
 
     assert heat1["flagged_for_review"] is False
+    assert heat1["flags"] == []
     # H-2 wasn't flagged by the (mocked) LLM, but its China sub-lot is
     # covered — main.py's deterministic per-sub-lot check must catch it
     # even when the model's own judgment doesn't.
     assert heat2["flagged_for_review"] is True
-    assert "FEOC-covered" in heat2["flagged_reason"]
+    china_flag = next(f for f in heat2["flags"] if f["issue_type"] == "compliance_violation")
+    assert "FEOC-covered" in china_flag["human_readable_reason"]
+    assert china_flag["severity"] == "blocking"
+    assert china_flag["source"] == "compliance_engine"
     china_sublot = next(s for s in heat2["sublots"] if s["origin_country"] == "China")
     assert china_sublot["flagged"] is True
+    assert china_sublot["flags"][0]["issue_type"] == "compliance_violation"
 
 
 def test_review_heat_locks_after_review(client, conn):
