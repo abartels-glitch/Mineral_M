@@ -1,0 +1,116 @@
+<title>Passport Lookup — FEOC Compliance Passport</title>
+<link rel="stylesheet" href="/style.css" />
+
+<header>
+  <h1>FEOC Compliance Passport (MVP)</h1>
+  <nav>
+    <a href="/index.html">Review queue</a>
+    <a href="/passport.html">Passport lookup</a>
+    <a href="/scan.html">Scan</a>
+  </nav>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Look up a credential</h2>
+    <p class="muted">
+      Enter a credential id (e.g. a sintered-batch credential id from
+      <code>seed.py</code>'s output) to compile its passport: a recursive
+      walk of the credential graph checking signatures, revocation, FEOC-covered
+      origin countries, materials scope, and segregation attestations.
+    </p>
+    <label for="credential-id">Credential id</label>
+    <input type="text" id="credential-id" placeholder="e.g. 9f2c1a..." />
+    <button id="lookup-btn">Compile passport</button>
+    <p class="error" id="lookup-error"></p>
+  </section>
+
+  <section class="panel" id="result-panel" style="display: none">
+    <h2>Result</h2>
+    <div id="verdict"></div>
+    <p><a id="pdf-link" href="#" target="_blank">Download PDF report →</a></p>
+    <h3>Why</h3>
+    <ul id="reasons"></ul>
+    <h3>Credential graph</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Credential</th>
+          <th>Type</th>
+          <th>Material</th>
+          <th>Origin</th>
+          <th>Status</th>
+          <th>Reasons</th>
+        </tr>
+      </thead>
+      <tbody id="node-rows"></tbody>
+    </table>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+<script>
+  const input = document.getElementById("credential-id");
+  const params = new URLSearchParams(location.search);
+  if (params.get("id")) input.value = params.get("id");
+
+  document.getElementById("lookup-btn").addEventListener("click", lookup);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") lookup();
+  });
+  if (params.get("id")) lookup();
+
+  async function lookup() {
+    const id = input.value.trim();
+    const errorEl = document.getElementById("lookup-error");
+    const resultPanel = document.getElementById("result-panel");
+    errorEl.textContent = "";
+    if (!id) {
+      errorEl.textContent = "Enter a credential id.";
+      return;
+    }
+    try {
+      const result = await apiFetch(`/passport/${encodeURIComponent(id)}`);
+      renderResult(result);
+      resultPanel.style.display = "block";
+    } catch (e) {
+      resultPanel.style.display = "none";
+      errorEl.textContent = e.message;
+    }
+  }
+
+  function verdictLabel(v) {
+    return { pass: "PASS", fail: "FAIL", insufficient_data: "INSUFFICIENT DATA" }[v] || v;
+  }
+
+  function renderResult(result) {
+    const verdictEl = document.getElementById("verdict");
+    verdictEl.className = "";
+    verdictEl.innerHTML = "";
+    verdictEl.appendChild(
+      el("div", { class: `verdict ${result.verdict}`, text: verdictLabel(result.verdict) })
+    );
+    document.getElementById("pdf-link").href = `/passport/${result.credential_id}/pdf`;
+
+    const reasonsEl = document.getElementById("reasons");
+    reasonsEl.innerHTML = "";
+    for (const reason of result.reasons) {
+      reasonsEl.appendChild(el("li", { text: reason }));
+    }
+
+    const rows = document.getElementById("node-rows");
+    rows.innerHTML = "";
+    for (const node of result.nodes) {
+      rows.appendChild(
+        el("tr", {}, [
+          el("td", { text: node.credential_id.slice(0, 12) + "…" }),
+          el("td", { text: node.credential_type }),
+          el("td", { text: node.material_type || "—" }),
+          el("td", { text: node.origin_country || "—" }),
+          el("td", {}, [el("span", { class: `node-status ${node.node_status}`, text: verdictLabel(node.node_status) })]),
+          el("td", { text: node.reasons.join("; ") }),
+        ])
+      );
+    }
+  }
+</script>

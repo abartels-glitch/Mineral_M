@@ -1,0 +1,297 @@
+<title>Review Queue — FEOC Compliance Passport</title>
+<link rel="stylesheet" href="/style.css" />
+
+<header>
+  <h1>FEOC Compliance Passport (MVP)</h1>
+  <nav>
+    <a href="/index.html">Review queue</a>
+    <a href="/passport.html">Passport lookup</a>
+    <a href="/scan.html">Scan</a>
+  </nav>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Upload a certificate of conformance / MTR</h2>
+    <p class="muted">
+      MVP only supports one document type (per the pinned document-scope
+      decision). PDFs are read via their embedded text layer, not image
+      OCR — a scanned/photographed document won't extract cleanly (see
+      README). Plain text files also work, for the demo samples.
+    </p>
+    <form id="upload-form">
+      <label for="upload-file">Document file (.pdf or .txt)</label>
+      <input type="file" id="upload-file" required />
+      <button type="submit">Upload &amp; extract</button>
+    </form>
+    <p class="error" id="upload-error"></p>
+  </section>
+
+  <div class="side-by-side">
+    <section class="panel">
+      <h2>Documents</h2>
+      <ul class="doc-list" id="doc-list"></ul>
+    </section>
+
+    <section class="panel" id="review-panel" style="display: none">
+      <h2>Review</h2>
+      <div id="review-content"></div>
+    </section>
+  </div>
+
+  <section class="panel" id="issue-panel" style="display: none">
+    <h2>Issue a credential</h2>
+    <div id="issue-content"></div>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+<script>
+  let documents = [];
+  let credentials = [];
+  let selectedDocumentId = null;
+
+  async function refreshAll() {
+    documents = await apiFetch("/documents");
+    credentials = await apiFetch("/credentials");
+    renderDocList();
+  }
+
+  function renderDocList() {
+    const list = document.getElementById("doc-list");
+    list.innerHTML = "";
+    if (documents.length === 0) {
+      list.appendChild(el("li", { text: "No documents uploaded yet." }));
+    }
+    for (const doc of documents) {
+      const li = el(
+        "li",
+        { onclick: () => selectDocument(doc.id), class: doc.id === selectedDocumentId ? "selected" : "" },
+        [
+          el("span", { text: doc.filename }),
+          el("span", { class: `badge status-${doc.status}`, text: doc.status }),
+        ]
+      );
+      list.appendChild(li);
+    }
+  }
+
+  document.getElementById("upload-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fileInput = document.getElementById("upload-file");
+    const errorEl = document.getElementById("upload-error");
+    errorEl.textContent = "";
+    if (!fileInput.files.length) return;
+    const form = new FormData();
+    form.append("file", fileInput.files[0]);
+    form.append("document_type", "mtr_coc");
+    try {
+      const doc = await apiFetch("/documents/upload", { method: "POST", body: form });
+      fileInput.value = "";
+      await refreshAll();
+      selectDocument(doc.id);
+    } catch (err) {
+      errorEl.textContent = err.message;
+    }
+  });
+
+  async function selectDocument(id) {
+    selectedDocumentId = id;
+    renderDocList();
+    const doc = await apiFetch(`/documents/${id}`);
+    renderReviewPanel(doc);
+  }
+
+  function renderReviewPanel(doc) {
+    const panel = document.getElementById("review-panel");
+    const content = document.getElementById("review-content");
+    panel.style.display = "block";
+    content.innerHTML = "";
+
+    const locked = doc.status === "reviewed";
+
+    content.appendChild(
+      el("div", { class: "side-by-side" }, [
+        el("div", {}, [el("label", { text: "Raw text" }), el("pre", { text: doc.raw_text })]),
+        el("div", {}, buildFieldEditor(doc, locked)),
+      ])
+    );
+
+    if (locked) {
+      content.appendChild(
+        el("p", { class: "success", text: `Reviewed by ${doc.reviewed_by} at ${doc.reviewed_at}. Locked from further edits.` })
+      );
+      renderIssuePanel(doc);
+    } else {
+      document.getElementById("issue-panel").style.display = "none";
+    }
+  }
+
+  const LOW_CONFIDENCE_THRESHOLD = 0.7;
+
+  function confidenceLabel(confidence) {
+    if (!confidence) return "not found";
+    if (confidence < LOW_CONFIDENCE_THRESHOLD) return "low confidence — review carefully";
+    return "extracted";
+  }
+
+  function confidenceClass(confidence) {
+    if (!confidence) return "conf-none";
+    if (confidence < LOW_CONFIDENCE_THRESHOLD) return "conf-low";
+    return "conf-high";
+  }
+
+  function buildFieldEditor(doc, locked) {
+    const inputs = [];
+    const rows = [el("label", { text: "Extracted fields" })];
+    for (const field of doc.extracted_fields) {
+      const input = el("input", { type: "text", value: field.field_value || "", disabled: locked ? "disabled" : null });
+      input.dataset.fieldName = field.field_name;
+      inputs.push(input);
+      rows.push(
+        el("div", { class: "field-row" }, [
+          el("div", { class: "field-row-head" }, [
+            el("span", { class: "field-row-label", text: field.field_name }),
+            el("span", { class: `conf ${confidenceClass(field.confidence)}`, text: confidenceLabel(field.confidence) }),
+          ]),
+          input,
+        ])
+      );
+    }
+    if (!locked) {
+      const submitBtn = el("button", {
+        text: "Submit review",
+        onclick: async () => {
+          const fields = inputs.map((i) => ({ field_name: i.dataset.fieldName, field_value: i.value || null }));
+          try {
+            const updated = await apiFetch(`/documents/${doc.id}/review`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ fields }),
+            });
+            await refreshAll();
+            renderReviewPanel(updated);
+          } catch (err) {
+            alert(err.message);
+          }
+        },
+      });
+      rows.push(submitBtn);
+    }
+    return rows;
+  }
+
+  function fieldValue(doc, name) {
+    const f = doc.extracted_fields.find((x) => x.field_name === name);
+    return f ? f.field_value || "" : "";
+  }
+
+  function renderIssuePanel(doc) {
+    const panel = document.getElementById("issue-panel");
+    const content = document.getElementById("issue-content");
+    panel.style.display = "block";
+    content.innerHTML = "";
+
+    const credentialType = el("input", { type: "text", id: "credential-type", value: "collected_scrap_lot" });
+    const materialType = el("input", { type: "text", id: "material-type", value: fieldValue(doc, "material_type") });
+    const originCountry = el("input", { type: "text", id: "origin-country", value: fieldValue(doc, "origin_country") });
+    const massKg = el("input", { type: "text", id: "mass-kg", value: fieldValue(doc, "mass_kg") });
+    const heatNumber = el("input", { type: "text", id: "heat-number", value: fieldValue(doc, "heat_number") });
+    const supplierName = el("input", { type: "text", id: "supplier-name", value: fieldValue(doc, "supplier_name") });
+
+    const sourceCheckboxes = credentials.map((c) =>
+      el("label", { style: "display:flex;align-items:center;gap:0.4rem;font-weight:normal;color:inherit" }, [
+        el("input", { type: "checkbox", value: c.id, class: "source-checkbox" }),
+        document.createTextNode(`${c.credential_type} — ${c.id.slice(0, 10)}…`),
+      ])
+    );
+
+    const segregationBlock = el("div", { id: "segregation-block", style: "display:none" }, [
+      el("label", { text: "Segregation attested" }),
+      el("label", { style: "display:flex;align-items:center;gap:0.4rem;font-weight:normal" }, [
+        el("input", { type: "checkbox", id: "segregation-attested" }),
+        document.createTextNode("I attest the sources were physically/documentarily segregated"),
+      ]),
+      el("label", { text: "Attested by (named person)" }),
+      el("input", { type: "text", id: "segregation-attested-by" }),
+      el("label", { text: "Control description" }),
+      el("textarea", { id: "segregation-note", rows: "2" }),
+    ]);
+
+    for (const cb of sourceCheckboxes) {
+      cb.querySelector("input").addEventListener("change", () => {
+        const checked = content.querySelectorAll(".source-checkbox:checked").length;
+        segregationBlock.style.display = checked >= 2 ? "block" : "none";
+      });
+    }
+
+    const resultEl = el("p", {});
+
+    const submitBtn = el("button", {
+      text: "Issue credential",
+      onclick: async () => {
+        const sources = Array.from(content.querySelectorAll(".source-checkbox:checked")).map((c) => c.value);
+        const body = {
+          credential_type: credentialType.value,
+          document_id: doc.id,
+          subject: {
+            material_type: materialType.value,
+            origin_country: originCountry.value,
+            mass_kg: parseFloat(massKg.value) || massKg.value,
+            heat_number: heatNumber.value,
+            supplier_name: supplierName.value,
+          },
+          sources,
+          segregation_attested: document.getElementById("segregation-attested")?.checked || false,
+          segregation_attested_by: document.getElementById("segregation-attested-by")?.value || null,
+          segregation_note: document.getElementById("segregation-note")?.value || null,
+        };
+        try {
+          const cred = await apiFetch("/credentials/issue", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          resultEl.innerHTML = "";
+          resultEl.appendChild(
+            el("span", { class: "success", text: `Issued credential ${cred.id}. ` })
+          );
+          resultEl.appendChild(el("a", { href: `/passport.html?id=${cred.id}`, text: "View passport →" }));
+          resultEl.appendChild(
+            el("div", { style: "margin-top: 0.5rem" }, [
+              el("label", { text: "Data Matrix (scan to open this passport)" }),
+              el("img", {
+                src: `/credentials/${cred.id}/uii/image`,
+                alt: `Data Matrix for credential ${cred.id}`,
+                style: "width: 120px; height: 120px; image-rendering: pixelated; border: 1px solid var(--border); border-radius: 6px; background: #fff",
+              }),
+            ])
+          );
+          credentials = await apiFetch("/credentials");
+        } catch (err) {
+          resultEl.innerHTML = "";
+          resultEl.appendChild(el("span", { class: "error", text: err.message }));
+        }
+      },
+    });
+
+    content.append(
+      el("label", { text: "Credential type" }), credentialType,
+      el("label", { text: "Material type" }), materialType,
+      el("label", { text: "Origin country" }), originCountry,
+      el("label", { text: "Mass (kg)" }), massKg,
+      el("label", { text: "Heat number" }), heatNumber,
+      el("label", { text: "Supplier name" }), supplierName,
+      el("label", { text: "Source credentials (select 2+ to require segregation attestation)" }),
+      el("div", {}, sourceCheckboxes.length ? sourceCheckboxes : [el("p", { class: "muted", text: "No existing credentials yet." })]),
+      segregationBlock,
+      submitBtn,
+      resultEl
+    );
+  }
+
+  (async () => {
+    const user = await requireAuth(["org_user", "platform_admin"]);
+    if (user) await refreshAll();
+  })();
+</script>

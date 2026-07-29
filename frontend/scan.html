@@ -1,0 +1,79 @@
+<title>Scan — FEOC Compliance Passport</title>
+<link rel="stylesheet" href="/style.css" />
+
+<header>
+  <h1>FEOC Compliance Passport (MVP)</h1>
+  <nav>
+    <a href="/index.html">Review queue</a>
+    <a href="/passport.html">Passport lookup</a>
+    <a href="/scan.html">Scan</a>
+  </nav>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Scan a part's Data Matrix code</h2>
+    <p class="muted">
+      Point a camera at the Data Matrix printed on a part (generated at
+      credential issuance — see <code>index.html</code>) and it resolves
+      straight to that credential's passport, no login required. Uses
+      <a href="https://github.com/zxing-js/library" target="_blank" rel="noopener">ZXing</a>,
+      vendored locally under <code>frontend/vendor/</code> rather than a CDN,
+      to keep the frontend self-contained like the rest of the app.
+    </p>
+    <p class="muted">
+      <strong>Not live-camera-tested in development</strong> — built
+      against ZXing's documented <code>BrowserMultiFormatReader</code>
+      API; verify this yourself with a real device/camera.
+    </p>
+    <video id="preview" style="width: 100%; max-width: 480px; border-radius: 8px; background: #000"></video>
+    <p class="error" id="scan-error"></p>
+    <p class="success" id="scan-status"></p>
+  </section>
+</main>
+
+<script src="/vendor/zxing.min.js"></script>
+<script src="/app.js"></script>
+<script>
+  const statusEl = document.getElementById("scan-status");
+  const errorEl = document.getElementById("scan-error");
+
+  async function start() {
+    if (!window.ZXing) {
+      errorEl.textContent = "Barcode scanning library failed to load.";
+      return;
+    }
+    const hints = new Map();
+    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.DATA_MATRIX]);
+    const reader = new ZXing.BrowserMultiFormatReader(hints);
+
+    try {
+      statusEl.textContent = "Requesting camera access…";
+      const devices = await ZXing.BrowserCodeReader.listVideoInputDevices();
+      if (!devices.length) {
+        errorEl.textContent = "No camera found.";
+        return;
+      }
+      statusEl.textContent = "Scanning…";
+      reader.decodeFromVideoDevice(devices[0].deviceId, "preview", (result, err) => {
+        if (result) {
+          const text = result.getText();
+          statusEl.textContent = `Decoded: ${text}`;
+          reader.reset();
+          if (/^https?:\/\//.test(text)) {
+            location.href = text;
+          } else {
+            // Fall back to treating the payload as a bare credential id.
+            location.href = `/passport.html?id=${encodeURIComponent(text)}`;
+          }
+        }
+        // NotFoundException fires continuously between frames with no
+        // match — that's expected, not an error to surface.
+      });
+    } catch (err) {
+      errorEl.textContent = err.message || String(err);
+    }
+  }
+
+  start();
+</script>

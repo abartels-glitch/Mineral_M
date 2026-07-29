@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+pydantic
+cryptography
+pytest
+httpx
+python-multipart
+bcrypt
+pymupdf
+anthropic
+python-dotenv
+pystrich
+reportlab

@@ -1,0 +1,45 @@
+<title>Log in — FEOC Compliance Passport</title>
+<link rel="stylesheet" href="/style.css" />
+
+<header>
+  <h1>FEOC Compliance Passport (MVP)</h1>
+</header>
+
+<main>
+  <section class="panel" style="max-width: 420px; margin: 2rem auto">
+    <h2>Log in</h2>
+    <p class="muted">
+      Accounts are created by a platform admin, not self-registered (see
+      <code>seed.py</code> for the dev accounts).
+    </p>
+    <form id="login-form">
+      <label for="email">Email</label>
+      <input type="text" id="email" autocomplete="username" />
+      <label for="password">Password</label>
+      <input type="password" id="password" autocomplete="current-password" />
+      <button type="submit">Log in</button>
+    </form>
+    <p class="error" id="login-error"></p>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+<script>
+  document.getElementById("login-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const email = document.getElementById("email").value.trim();
+    const password = document.getElementById("password").value;
+    const errorEl = document.getElementById("login-error");
+    errorEl.textContent = "";
+    try {
+      await apiFetch("/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      location.href = "/index.html";
+    } catch (err) {
+      errorEl.textContent = err.message;
+    }
+  });
+</script>

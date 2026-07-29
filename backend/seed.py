@@ -1,0 +1,236 @@
+"""Seed a fictional design-partner profile so the passport lookup has real
+data to show immediately, without needing a real design partner yet.
+
+Rio Grande Magnetics is a SYNTHETIC/PROVISIONAL profile (see README) — a
+fictional single-site NdFeB magnet recycler in Texas that collects
+decommissioned motors and hard-drive magnets from domestic sources only
+and sinters them into new NdFeB magnets on one dedicated line. Modeled on
+the real-world Noveon/e-VAC pattern of a traceable recycler, but no real
+company or data is represented here.
+
+Builds a 3-node credential graph: two collected_scrap_lot credentials feed
+one sintered_ndfeb_batch credential, which exercises the 2+-source
+segregation check end to end.
+
+Idempotent: re-running the script reuses the existing issuer/credentials
+instead of duplicating them.
+"""
+import hashlib
+import json
+import uuid
+from datetime import datetime, timezone
+
+import auth
+import crypto_utils
+import extractor
+import storage
+from db import get_connection, init_db
+
+ISSUER_NAME = "Rio Grande Magnetics"
+ORG_USER_EMAIL = "maria@riograndemagnetics.example"
+ORG_USER_PASSWORD = "riograndemagnetics-dev"
+ADMIN_EMAIL = "admin@feoc-passport.local"
+ADMIN_PASSWORD = "platform-admin-dev"
+
+SCRAP_LOT_1_TEXT = """CERTIFICATE OF CONFORMANCE / MILL TEST REPORT
+Supplier: Rio Grande Magnetics, LLC
+Heat Number: RGM-SCRAP-2026-0091
+Material: Domestically Collected NdFeB Scrap (decommissioned motors)
+Country of Origin: United States
+Batch Mass: 410.0 kg
+"""
+
+SCRAP_LOT_2_TEXT = """CERTIFICATE OF CONFORMANCE / MILL TEST REPORT
+Supplier: Rio Grande Magnetics, LLC
+Heat Number: RGM-SCRAP-2026-0092
+Material: Domestically Collected NdFeB Scrap (HDD magnets)
+Country of Origin: United States
+Batch Mass: 165.0 kg
+"""
+
+SINTERED_BATCH_TEXT = """CERTIFICATE OF CONFORMANCE / MILL TEST REPORT
+Supplier: Rio Grande Magnetics, LLC
+Heat Number: RGM-NDFEB-2026-0412
+Material: Sintered NdFeB Magnet Alloy (N42)
+Country of Origin: United States
+Batch Mass: 182.5 kg
+"""
+
+REVIEWER = "Maria Alvarez, QA Lead, Rio Grande Magnetics"
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def seed_document(conn, org_id: str, raw_text: str) -> str:
+    document_id = uuid.uuid4().hex
+    uploaded_at = now_iso()
+    filename = f"{document_id}.txt"
+    raw_bytes = raw_text.encode("utf-8")
+    object_key = f"{document_id}/{filename}"
+    storage.save_object(object_key, raw_bytes)
+    content_hash = hashlib.sha256(raw_bytes).hexdigest()
+    conn.execute(
+        """
+        INSERT INTO documents (id, org_id, filename, document_type, object_key, content_hash, raw_text, status, uploaded_at, reviewed_by, reviewed_at)
+        VALUES (?, ?, ?, 'mtr_coc', ?, ?, ?, 'reviewed', ?, ?, ?)
+        """,
+        (document_id, org_id, filename, object_key, content_hash, raw_text, uploaded_at, REVIEWER, uploaded_at),
+    )
+    # seed.py uses the deterministic regex extractor directly (not the LLM
+    # path) so `python seed.py` works offline with no API key required.
+    for field in extractor.extract_fields(raw_text):
+        conn.execute(
+            """
+            INSERT INTO extracted_fields (id, document_id, field_name, field_value, confidence, source, extraction_source, overridden_by_human)
+            VALUES (?, ?, ?, ?, ?, 'regex', 'regex', 0)
+            """,
+            (uuid.uuid4().hex, document_id, field["field_name"], field["field_value"], field["confidence"]),
+        )
+    return document_id
+
+
+def issue_credential(conn, issuer_id: str, private_key_path: str, credential_type: str, subject: dict,
+                      document_id: str | None, sources: list[str],
+                      segregation_attested: bool = False,
+                      segregation_attested_by: str | None = None,
+                      segregation_note: str | None = None) -> str:
+    document_content_hash = None
+    if document_id is not None:
+        doc = conn.execute("SELECT content_hash FROM documents WHERE id = ?", (document_id,)).fetchone()
+        document_content_hash = doc["content_hash"] if doc else None
+
+    credential_id = uuid.uuid4().hex
+    issued_at = now_iso()
+    payload = crypto_utils.credential_signable_payload(
+        id=credential_id,
+        issuer_id=issuer_id,
+        credential_type=credential_type,
+        subject=subject,
+        sources=sources,
+        segregation_attested=segregation_attested,
+        segregation_attested_by=segregation_attested_by,
+        segregation_note=segregation_note,
+        document_id=document_id,
+        document_content_hash=document_content_hash,
+        issued_at=issued_at,
+    )
+    signature, payload_hash = crypto_utils.sign_payload(private_key_path, payload)
+    conn.execute(
+        """
+        INSERT INTO credentials (
+            id, issuer_id, credential_type, subject_json, sources_json,
+            segregation_attested, segregation_attested_by, segregation_note,
+            document_id, document_content_hash, payload_hash, signature, superseded_by, revoked_at, issued_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+        """,
+        (
+            credential_id, issuer_id, credential_type, json.dumps(subject), json.dumps(sources),
+            1 if segregation_attested else 0, segregation_attested_by, segregation_note,
+            document_id, document_content_hash, payload_hash, signature, issued_at,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO uii_bindings (id, credential_id, uii_code, created_at) VALUES (?, ?, ?, ?)",
+        (uuid.uuid4().hex, credential_id, credential_id, issued_at),
+    )
+    return credential_id
+
+
+def main() -> None:
+    init_db()
+    conn = get_connection()
+
+    issuer = conn.execute("SELECT * FROM issuers WHERE name = ?", (ISSUER_NAME,)).fetchone()
+    if issuer is not None:
+        existing_batch = conn.execute(
+            "SELECT id FROM credentials WHERE issuer_id = ? AND credential_type = 'sintered_ndfeb_batch'",
+            (issuer["id"],),
+        ).fetchone()
+        if existing_batch is not None:
+            print(f"Already seeded. Sintered batch credential id: {existing_batch['id']}")
+            print(f"Look it up: curl http://localhost:8000/passport/{existing_batch['id']}")
+            return
+        issuer_id = issuer["id"]
+        private_key_path = issuer["private_key_path"]
+    else:
+        issuer_id = uuid.uuid4().hex
+        public_key_b64, private_key_path = crypto_utils.generate_issuer_keypair(issuer_id)
+        conn.execute(
+            "INSERT INTO issuers (id, name, public_key, private_key_path, created_at) VALUES (?, ?, ?, ?, ?)",
+            (issuer_id, ISSUER_NAME, public_key_b64, private_key_path, now_iso()),
+        )
+        conn.commit()
+
+    if conn.execute("SELECT id FROM users WHERE email = ?", (ORG_USER_EMAIL,)).fetchone() is None:
+        conn.execute(
+            "INSERT INTO users (id, org_id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, 'org_user', ?)",
+            (uuid.uuid4().hex, issuer_id, ORG_USER_EMAIL, auth.hash_password(ORG_USER_PASSWORD), now_iso()),
+        )
+    if conn.execute("SELECT id FROM users WHERE email = ?", (ADMIN_EMAIL,)).fetchone() is None:
+        conn.execute(
+            "INSERT INTO users (id, org_id, email, password_hash, role, created_at) VALUES (?, NULL, ?, ?, 'platform_admin', ?)",
+            (uuid.uuid4().hex, ADMIN_EMAIL, auth.hash_password(ADMIN_PASSWORD), now_iso()),
+        )
+    conn.commit()
+
+    lot1_doc_id = seed_document(conn, issuer_id, SCRAP_LOT_1_TEXT)
+    lot2_doc_id = seed_document(conn, issuer_id, SCRAP_LOT_2_TEXT)
+    batch_doc_id = seed_document(conn, issuer_id, SINTERED_BATCH_TEXT)
+    conn.commit()
+
+    lot1_id = issue_credential(
+        conn, issuer_id, private_key_path, "collected_scrap_lot",
+        subject={
+            "material_type": "Domestically Collected NdFeB Scrap (decommissioned motors)",
+            "origin_country": "United States",
+            "mass_kg": 410.0,
+            "heat_number": "RGM-SCRAP-2026-0091",
+            "supplier_name": ISSUER_NAME,
+        },
+        document_id=lot1_doc_id, sources=[],
+    )
+    lot2_id = issue_credential(
+        conn, issuer_id, private_key_path, "collected_scrap_lot",
+        subject={
+            "material_type": "Domestically Collected NdFeB Scrap (HDD magnets)",
+            "origin_country": "United States",
+            "mass_kg": 165.0,
+            "heat_number": "RGM-SCRAP-2026-0092",
+            "supplier_name": ISSUER_NAME,
+        },
+        document_id=lot2_doc_id, sources=[],
+    )
+    batch_id = issue_credential(
+        conn, issuer_id, private_key_path, "sintered_ndfeb_batch",
+        subject={
+            "material_type": "Sintered NdFeB Magnet Alloy (N42)",
+            "origin_country": "United States",
+            "mass_kg": 182.5,
+            "heat_number": "RGM-NDFEB-2026-0412",
+            "supplier_name": ISSUER_NAME,
+        },
+        document_id=batch_doc_id, sources=[lot1_id, lot2_id],
+        segregation_attested=True,
+        segregation_attested_by=REVIEWER,
+        segregation_note=(
+            "Dedicated single-line sintering process; tooling purged and "
+            "lot-tagged between production runs; no shared feedstock with "
+            "non-domestic or non-qualifying material."
+        ),
+    )
+    conn.commit()
+
+    print(f"Seeded issuer: {ISSUER_NAME} ({issuer_id})")
+    print(f"Seeded collected_scrap_lot credentials: {lot1_id}, {lot2_id}")
+    print(f"Seeded sintered_ndfeb_batch credential: {batch_id}")
+    print(f"Look it up (no login needed): curl http://localhost:8000/passport/{batch_id}")
+    print()
+    print("Dev login accounts (DEV ONLY, not real credentials):")
+    print(f"  org_user:       {ORG_USER_EMAIL} / {ORG_USER_PASSWORD}  (Rio Grande Magnetics)")
+    print(f"  platform_admin: {ADMIN_EMAIL} / {ADMIN_PASSWORD}")
+
+
+if __name__ == "__main__":
+    main()
