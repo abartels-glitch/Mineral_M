@@ -239,6 +239,18 @@ pre {
 .flag-meta { color: var(--muted); font-size: 0.7rem; white-space: nowrap; }
 .flag-reason { flex: 1; }
 
+/* A resolved flag stays in the list (compliance history), it just stops
+   competing visually with flags that still need attention. */
+.flag-item.resolved { background: transparent; border-left-color: var(--border); opacity: 0.6; }
+.flag-item.resolved .flag-severity, .flag-item.resolved .flag-meta { color: var(--muted); }
+.flag-item.resolved .flag-reason { text-decoration: line-through; }
+
+.correction-panel { margin: 0 0 0.75rem; padding: 0.6rem 0.7rem; border: 1px dashed var(--border); border-radius: 8px; }
+.correction-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; flex-wrap: wrap; }
+.correction-row:last-child { margin-bottom: 0; }
+.correction-row .correction-label { font-weight: 600; font-size: 0.8rem; white-space: nowrap; }
+.correction-row input { width: auto; flex: 1; min-width: 140px; margin-bottom: 0; }
+
 .editable-table input, .editable-table select {
   margin-bottom: 0;
   padding: 0.3rem;

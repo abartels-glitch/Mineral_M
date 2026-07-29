@@ -143,7 +143,7 @@
   function renderAuditTrail(trail) {
     const rows = document.getElementById("audit-rows");
     rows.innerHTML = "";
-    const entries = [...trail.audit_log, ...trail.document_audit_log].sort((a, b) =>
+    const entries = [...trail.audit_log, ...trail.document_audit_log, ...(trail.heat_audit_log || [])].sort((a, b) =>
       a.created_at.localeCompare(b.created_at)
     );
     for (const entry of entries) {

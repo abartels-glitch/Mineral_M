@@ -96,10 +96,10 @@
     selectedDocumentId = id;
     renderDocList();
     const doc = await apiFetch(`/documents/${id}`);
-    renderDocumentPanel(doc);
+    await renderDocumentPanel(doc);
   }
 
-  function renderDocumentPanel(doc) {
+  async function renderDocumentPanel(doc) {
     const panel = document.getElementById("review-panel");
     const content = document.getElementById("review-content");
     panel.style.display = "block";
@@ -119,7 +119,8 @@
     );
 
     for (const heat of doc.heats) {
-      content.appendChild(renderHeatCard(doc, heat));
+      const trail = await apiFetch(`/documents/${doc.id}/heats/${heat.id}/audit-trail`);
+      content.appendChild(renderHeatCard(doc, heat, trail));
     }
   }
 
@@ -133,24 +134,115 @@
     return el("span", { class: `tag ${cls}`, text: label || defaultLabel });
   }
 
-  // Structured review flags — {issue_type, field_name, severity, human_readable_reason, source}.
-  // Rendered sorted with blocking (compliance_violation) first, so a reviewer
-  // scanning top-to-bottom sees the highest-stakes issue before the rest.
+  // Structured review flags — {issue_type, field_name, severity, human_readable_reason,
+  // source, status, resolved_by, resolved_at}. Rendered with open flags first
+  // (blocking, then needs_review), resolved ones last and visually muted —
+  // resolved flags stay in the list (compliance history), they just stop
+  // competing with what still needs a reviewer's attention.
   const SEVERITY_ORDER = { blocking: 0, needs_review: 1 };
   function renderFlagList(flags) {
     if (!flags || !flags.length) return null;
-    const sorted = [...flags].sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 2) - (SEVERITY_ORDER[b.severity] ?? 2));
-    const items = sorted.map((f) =>
-      el("li", { class: `flag-item ${f.severity}` }, [
-        el("span", { class: "flag-severity", text: f.severity.replace("_", " ") }),
+    const sorted = [...flags].sort((a, b) => {
+      const aOpen = a.status !== "resolved";
+      const bOpen = b.status !== "resolved";
+      if (aOpen !== bOpen) return aOpen ? -1 : 1;
+      return (SEVERITY_ORDER[a.severity] ?? 2) - (SEVERITY_ORDER[b.severity] ?? 2);
+    });
+    const items = sorted.map((f) => {
+      const resolved = f.status === "resolved";
+      return el("li", { class: `flag-item ${f.severity}${resolved ? " resolved" : ""}` }, [
+        el("span", { class: "flag-severity", text: resolved ? "resolved" : f.severity.replace("_", " ") }),
         el("span", { class: "flag-reason", text: f.human_readable_reason }),
         el("span", {
           class: "flag-meta",
-          text: `${f.issue_type}${f.field_name ? " · " + f.field_name : ""} · ${f.source}`,
+          text: resolved
+            ? `${f.issue_type}${f.field_name ? " · " + f.field_name : ""} · resolved by ${f.resolved_by} at ${f.resolved_at}`
+            : `${f.issue_type}${f.field_name ? " · " + f.field_name : ""} · ${f.source}`,
         }),
+      ]);
+    });
+    return el("ul", { class: "flag-list" }, items);
+  }
+
+  // Compact form for correcting exactly the fields something flagged —
+  // separate from the big "Submit review" form below, and (unlike that
+  // form) usable regardless of whether the heat is locked, since a
+  // correction is its own audited event rather than a re-review.
+  function renderCorrectionPanel(doc, heat, statusEl, onSaved) {
+    const targets = [];
+    for (const f of heat.flags || []) {
+      if (f.status !== "resolved" && f.field_name) targets.push({ target: "heat", sublot: null, flag: f });
+    }
+    for (const sublot of heat.sublots) {
+      for (const f of sublot.flags || []) {
+        if (f.status !== "resolved" && f.field_name) targets.push({ target: "sublot", sublot, flag: f });
+      }
+    }
+    if (!targets.length) return null;
+
+    const container = el("div", { class: "correction-panel" });
+    container.appendChild(el("h4", { text: "Correct flagged fields", style: "margin: 0 0 0.4rem 0; font-size: 0.85rem" }));
+
+    for (const { target, sublot, flag } of targets) {
+      const currentValue = target === "heat" ? heat[flag.field_name] : sublot[flag.field_name];
+      const input = el("input", { type: "text", value: currentValue ?? "" });
+      const saveBtn = el("button", {
+        class: "icon-btn",
+        type: "button",
+        text: "Save correction",
+        onclick: async () => {
+          statusEl.textContent = "";
+          try {
+            await apiFetch(`/documents/${doc.id}/heats/${heat.id}/correct`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                target,
+                sublot_id: target === "sublot" ? sublot.id : null,
+                field_name: flag.field_name,
+                corrected_value: input.value,
+              }),
+            });
+            await onSaved();
+          } catch (err) {
+            statusEl.textContent = err.message;
+          }
+        },
+      });
+      const label = target === "sublot" ? `Sub-lot ${sublot.sublot_id || sublot.id.slice(0, 6)} · ${flag.field_name}` : flag.field_name;
+      container.appendChild(
+        el("div", { class: "correction-row" }, [
+          el("span", { class: "correction-label", text: label }),
+          el("span", { class: "muted", text: flag.human_readable_reason }),
+          input,
+          saveBtn,
+        ])
+      );
+    }
+    return container;
+  }
+
+  function renderCorrectionHistory(trail) {
+    if (!trail || !trail.length) return null;
+    const container = el("div", {});
+    container.appendChild(el("h4", { text: "Correction history", style: "margin: 0.75rem 0 0.4rem 0; font-size: 0.85rem" }));
+    const rows = trail.map((entry) =>
+      el("tr", {}, [
+        el("td", { text: entry.created_at }),
+        el("td", { text: entry.action }),
+        el("td", { text: entry.actor }),
+        el("td", { text: Object.keys(entry.detail).length ? JSON.stringify(entry.detail) : "—" }),
       ])
     );
-    return el("ul", { class: "flag-list" }, items);
+    container.appendChild(
+      el("table", {}, [
+        el("thead", {}, [
+          el("tr", {}, [el("th", { text: "When" }), el("th", { text: "Action" }), el("th", { text: "Actor" }), el("th", { text: "Detail" })]),
+        ]),
+        el("tbody", {}, rows),
+      ])
+    );
+    return container;
   }
 
   function buildKeyValueEditor(initialDict, locked) {
@@ -276,9 +368,10 @@
     };
   }
 
-  function renderHeatCard(doc, heat) {
+  function renderHeatCard(doc, heat, trail) {
     const locked = heat.reviewed;
     const card = el("div", { class: "heat-card" });
+    const statusEl = el("p", { class: "error" });
 
     const hasBlockingFlag = (heat.flags || []).some((f) => f.severity === "blocking");
     const headerStatusTag = hasBlockingFlag
@@ -287,7 +380,12 @@
       ? tag("flagged", "flagged for review")
       : tag("found", "clean");
     const headerTags = [headerStatusTag];
-    headerTags.push(el("span", { class: `badge status-${locked ? "reviewed" : "extracted"}`, text: locked ? "reviewed" : "needs review" }));
+    // Reviewed badge: true only once someone has both submitted the
+    // review form AND every flagged field is addressed — submitting the
+    // form alone used to be enough, which let a heat with a still-open
+    // blocking flag read as "reviewed" in the UI.
+    const badgeReviewed = heat.reviewed && heat.fully_addressed;
+    headerTags.push(el("span", { class: `badge status-${badgeReviewed ? "reviewed" : "extracted"}`, text: badgeReviewed ? "reviewed" : "needs review" }));
 
     card.appendChild(
       el("div", { class: "heat-card-header" }, [
@@ -297,6 +395,13 @@
     );
     const heatFlagList = renderFlagList(heat.flags);
     if (heatFlagList) card.appendChild(heatFlagList);
+
+    const correctionPanel = renderCorrectionPanel(doc, heat, statusEl, async () => {
+      const updatedDoc = await apiFetch(`/documents/${doc.id}`);
+      await refreshAll();
+      await renderDocumentPanel(updatedDoc);
+    });
+    if (correctionPanel) card.appendChild(correctionPanel);
 
     const heatIdInput = el("input", { type: "text", value: heat.heat_id || "", disabled: locked ? "disabled" : null });
     const massInput = el("input", { type: "text", value: heat.mass_kg ?? "", disabled: locked ? "disabled" : null });
@@ -335,8 +440,6 @@
     const sublotEditor = buildSublotEditor(heat.sublots, locked);
     card.appendChild(sublotEditor.container);
 
-    const statusEl = el("p", { class: "error" });
-
     if (!locked) {
       card.appendChild(
         el("button", {
@@ -362,7 +465,7 @@
               });
               const updatedDoc = await apiFetch(`/documents/${doc.id}`);
               await refreshAll();
-              renderDocumentPanel(updatedDoc);
+              await renderDocumentPanel(updatedDoc);
             } catch (err) {
               statusEl.textContent = err.message;
             }
@@ -382,6 +485,8 @@
     }
 
     card.appendChild(statusEl);
+    const historyTable = renderCorrectionHistory(trail);
+    if (historyTable) card.appendChild(historyTable);
     return card;
   }
 
