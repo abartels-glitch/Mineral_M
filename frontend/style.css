@@ -123,6 +123,11 @@ pre {
 .side-by-side > * { min-width: 0; }
 @media (max-width: 700px) { .side-by-side { grid-template-columns: 1fr; } }
 
+/* Workflow-status badge (has a human reviewed this yet?) — deliberately
+   outlined/grayscale, never the filled red/amber/green used by flag
+   severity (.tag, .flag-item below). Two different questions ("is
+   there a problem?" vs "has someone signed off?") need two different-
+   looking answers, not two colored labels from the same palette. */
 .badge {
   display: inline-block;
   padding: 0.15rem 0.6rem;
@@ -131,9 +136,11 @@ pre {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.02em;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
 }
-.badge.status-uploaded, .badge.status-extracted { background: var(--insufficient-bg); color: var(--insufficient); }
-.badge.status-reviewed { background: var(--pass-bg); color: var(--pass); }
+.badge.status-reviewed { border-color: var(--text); color: var(--text); }
 
 .verdict {
   font-size: 1.4rem;
@@ -239,6 +246,7 @@ pre {
 }
 .editable-table td { vertical-align: middle; }
 .editable-table tr.flagged-row { background: var(--insufficient-bg); }
+.editable-table tr.blocking-row { background: var(--fail-bg); }
 
 .icon-btn {
   padding: 0.2rem 0.5rem;

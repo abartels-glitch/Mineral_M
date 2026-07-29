@@ -182,8 +182,9 @@
         const sublotFlags = sublot.flags || [];
         const worstSeverity = sublotFlags.some((f) => f.severity === "blocking") ? "blocking" : sublotFlags.length ? "needs_review" : null;
         const reasonText = sublotFlags.map((f) => f.human_readable_reason).join("; ") || "flagged";
+        const rowClass = worstSeverity === "blocking" ? "blocking-row" : worstSeverity ? "flagged-row" : "";
         sublotRows.appendChild(
-          el("tr", { class: sublotFlags.length ? "flagged-row" : "" }, [
+          el("tr", { class: rowClass }, [
             el("td", { text: sublot.sublot_id || "—" }),
             el("td", { text: sublot.blend_pct != null ? String(sublot.blend_pct) : "—" }),
             el("td", { text: sublot.origin_country || "—" }),

@@ -233,7 +233,8 @@
           ])
         );
       }
-      const row = el("tr", { class: sublotFlags.length ? "flagged-row" : "" }, cells);
+      const rowClass = worstSeverity === "blocking" ? "blocking-row" : worstSeverity ? "flagged-row" : "";
+      const row = el("tr", { class: rowClass }, cells);
       rows.push(row);
       tbody.appendChild(row);
     }
