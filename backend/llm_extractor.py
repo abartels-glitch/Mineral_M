@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 MODEL = "claude-haiku-4-5-20251001"
 
+# Haiku 4.5 first-party API pricing, per million tokens.
+INPUT_COST_PER_MTOK = 1.00
+OUTPUT_COST_PER_MTOK = 5.00
+
 BANNED_ORIGIN_COUNTRIES_HINT = "China, Russia, Iran, North Korea"
 
 SUBLOT_SCHEMA = {
@@ -34,7 +38,16 @@ SUBLOT_SCHEMA = {
         "sublot_id": {"type": ["string", "null"]},
         "blend_pct": {"type": ["number", "null"], "description": "Percent of this heat this sub-lot contributes, 0-100."},
         "origin_country": {"type": ["string", "null"]},
-        "origin_confidence": {"type": ["string", "null"], "enum": ["high", "low", None]},
+        "origin_confidence": {
+            "type": ["string", "null"],
+            "enum": ["high", "low", None],
+            "description": (
+                "How clearly and unambiguously the TEXT states this origin — not whether the origin "
+                "itself is desirable or compliant. 'high' if the text plainly states the origin, "
+                "regardless of which country it names. 'low' only if the text is hedged ('unconfirmed', "
+                "'pending documentation', 'possibly'), contradictory, or the origin is genuinely absent/unverified."
+            ),
+        },
         "notes": {"type": ["string", "null"]},
     },
     "required": ["sublot_id", "blend_pct", "origin_country", "origin_confidence", "notes"],
@@ -69,7 +82,16 @@ HEAT_SCHEMA = {
         "segregation_attested": {"type": "boolean"},
         "segregation_note": {"type": ["string", "null"]},
         "mass_kg": {"type": ["number", "null"]},
-        "confidence": {"type": "number", "description": "0.0-1.0 overall confidence in this heat's extraction."},
+        "confidence": {
+            "type": "number",
+            "description": (
+                "0.0-1.0 confidence that this heat's fields were read correctly from clear text — "
+                "NOT a judgment of whether the extracted facts are compliant or convenient. A heat "
+                "with a plainly-stated covered-country origin should score just as high as one with "
+                "a plainly-stated domestic origin. Only lower this for genuine textual ambiguity: "
+                "hedged language, contradictions, or missing data."
+            ),
+        },
         "flagged_for_review": {
             "type": "boolean",
             "description": (
@@ -129,10 +151,19 @@ SYSTEM_PROMPT = (
     "You extract structured data from a certificate of conformance / mill test report (MTR) "
     "for metal/alloy materials. A certificate may cover one heat/melt or several. Only use "
     "information explicitly present in the provided text — never guess or infer a value that "
-    "isn't stated; use null for anything not present, don't fabricate a plausible-looking value. "
+    "isn't stated; use null for anything not present, don't fabricate a plausible-looking value.\n\n"
+    "Confidence (both the per-heat `confidence` field and each sub-lot's `origin_confidence`) "
+    "measures ONLY how clearly and unambiguously the text states a fact — never how compliant, "
+    "convenient, or comfortable that fact is. A sub-lot stating 'Country of Origin: China' in "
+    "plain, direct language is HIGH confidence, exactly like one stating 'Country of Origin: "
+    "United States' plainly — the country named is irrelevant to the confidence score. Confidence "
+    "should only drop when the text itself is genuinely ambiguous, hedged ('unconfirmed', "
+    "'pending documentation', 'possibly'), contradictory, or absent. Do not let a compliance-"
+    "sensitive answer lower your confidence in what the text plainly says.\n\n"
     f"Flag a heat for review if any feedstock sub-lot has an unconfirmed or low-confidence origin, "
     f"contradictory origin data, or a covered country ({BANNED_ORIGIN_COUNTRIES_HINT}) anywhere in "
-    "its sub-lot table."
+    "its sub-lot table — flagging for review is separate from confidence: a plainly-stated "
+    "covered-country origin is both HIGH confidence and flagged for review at the same time."
 )
 
 RETRYABLE_ERRORS = (anthropic.APIError, RuntimeError, KeyError, ValueError, TypeError)
@@ -150,6 +181,15 @@ def _call_llm(raw_text: str) -> dict:
         tools=[TOOL],
         tool_choice={"type": "tool", "name": TOOL["name"]},
         messages=[{"role": "user", "content": raw_text}],
+    )
+    usage = response.usage
+    cost = (
+        usage.input_tokens * INPUT_COST_PER_MTOK
+        + usage.output_tokens * OUTPUT_COST_PER_MTOK
+    ) / 1_000_000
+    logger.info(
+        "llm_extractor call: model=%s input_tokens=%d output_tokens=%d cost=$%.5f",
+        MODEL, usage.input_tokens, usage.output_tokens, cost,
     )
     for block in response.content:
         if block.type == "tool_use":
