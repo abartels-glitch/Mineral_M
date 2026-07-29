@@ -128,9 +128,29 @@
   // (e.g. a sub-lot origin that's unconfirmed or covered-country), so it
   // must never collapse into looking like a clean miss.
   function tag(state, label) {
-    const cls = state === "flagged" ? "tag-flagged" : state === "found" ? "tag-found" : "tag-missing";
-    const defaultLabel = state === "flagged" ? "flagged" : state === "found" ? "found" : "not found";
+    const cls = state === "blocking" ? "tag-blocking" : state === "flagged" ? "tag-flagged" : state === "found" ? "tag-found" : "tag-missing";
+    const defaultLabel = state === "blocking" ? "blocking" : state === "flagged" ? "flagged" : state === "found" ? "found" : "not found";
     return el("span", { class: `tag ${cls}`, text: label || defaultLabel });
+  }
+
+  // Structured review flags — {issue_type, field_name, severity, human_readable_reason, source}.
+  // Rendered sorted with blocking (compliance_violation) first, so a reviewer
+  // scanning top-to-bottom sees the highest-stakes issue before the rest.
+  const SEVERITY_ORDER = { blocking: 0, needs_review: 1 };
+  function renderFlagList(flags) {
+    if (!flags || !flags.length) return null;
+    const sorted = [...flags].sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 2) - (SEVERITY_ORDER[b.severity] ?? 2));
+    const items = sorted.map((f) =>
+      el("li", { class: `flag-item ${f.severity}` }, [
+        el("span", { class: "flag-severity", text: f.severity.replace("_", " ") }),
+        el("span", { class: "flag-reason", text: f.human_readable_reason }),
+        el("span", {
+          class: "flag-meta",
+          text: `${f.issue_type}${f.field_name ? " · " + f.field_name : ""} · ${f.source}`,
+        }),
+      ])
+    );
+    return el("ul", { class: "flag-list" }, items);
   }
 
   function buildKeyValueEditor(initialDict, locked) {
@@ -192,7 +212,11 @@
       ]);
       confidenceSelect.value = sublot.origin_confidence || "";
       const notesInput = el("input", { type: "text", value: sublot.notes || "", disabled: locked ? "disabled" : null });
-      const statusTag = sublot.flagged ? tag("flagged", sublot.flagged_reason || "flagged") : tag("found", "ok");
+      const sublotFlags = sublot.flags || [];
+      const worstSeverity = sublotFlags.some((f) => f.severity === "blocking") ? "blocking" : sublotFlags.length ? "needs_review" : null;
+      const statusLabel = sublotFlags.length > 1 ? `flagged (${sublotFlags.length})` : "flagged";
+      const statusTag = worstSeverity === "blocking" ? tag("blocking", statusLabel) : worstSeverity ? tag("flagged", statusLabel) : tag("found", "ok");
+      if (sublotFlags.length) statusTag.title = sublotFlags.map((f) => f.human_readable_reason).join("; ");
 
       const cells = [
         el("td", {}, [sublotIdInput]),
@@ -209,7 +233,7 @@
           ])
         );
       }
-      const row = el("tr", { class: sublot.flagged ? "flagged-row" : "" }, cells);
+      const row = el("tr", { class: sublotFlags.length ? "flagged-row" : "" }, cells);
       rows.push(row);
       tbody.appendChild(row);
     }
@@ -255,7 +279,13 @@
     const locked = heat.reviewed;
     const card = el("div", { class: "heat-card" });
 
-    const headerTags = [heat.flagged_for_review ? tag("flagged", "flagged for review") : tag("found", "clean")];
+    const hasBlockingFlag = (heat.flags || []).some((f) => f.severity === "blocking");
+    const headerStatusTag = hasBlockingFlag
+      ? tag("blocking", "blocking issue")
+      : heat.flagged_for_review
+      ? tag("flagged", "flagged for review")
+      : tag("found", "clean");
+    const headerTags = [headerStatusTag];
     headerTags.push(el("span", { class: `badge status-${locked ? "reviewed" : "extracted"}`, text: locked ? "reviewed" : "needs review" }));
 
     card.appendChild(
@@ -264,9 +294,8 @@
         el("div", {}, headerTags),
       ])
     );
-    if (heat.flagged_for_review && heat.flagged_reason) {
-      card.appendChild(el("p", { class: "muted", text: `Why flagged: ${heat.flagged_reason}` }));
-    }
+    const heatFlagList = renderFlagList(heat.flags);
+    if (heatFlagList) card.appendChild(heatFlagList);
 
     const heatIdInput = el("input", { type: "text", value: heat.heat_id || "", disabled: locked ? "disabled" : null });
     const massInput = el("input", { type: "text", value: heat.mass_kg ?? "", disabled: locked ? "disabled" : null });

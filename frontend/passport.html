@@ -168,22 +168,32 @@
       const compositionText = heat.alloy_composition
         ? Object.entries(heat.alloy_composition).map(([k, v]) => `${k} ${v}%`).join(", ")
         : "not found";
-      const flagText = heat.flagged_for_review ? `FLAGGED — ${heat.flagged_reason}` : "not flagged";
+      const hasBlockingFlag = (heat.flags || []).some((f) => f.severity === "blocking");
+      const flagText = hasBlockingFlag
+        ? `BLOCKING — ${heat.flags.map((f) => f.human_readable_reason).join("; ")}`
+        : heat.flagged_for_review
+        ? `FLAGGED — ${(heat.flags || []).map((f) => f.human_readable_reason).join("; ")}`
+        : "not flagged";
       summaryEl.textContent =
         `Heat ${heat.heat_id || "(no id found)"} · extracted via ${heat.extraction_source} · ${flagText} · ` +
         `composition: ${compositionText} · mass: ${heat.mass_kg ?? "—"} kg`;
 
       for (const sublot of heat.sublots) {
+        const sublotFlags = sublot.flags || [];
+        const worstSeverity = sublotFlags.some((f) => f.severity === "blocking") ? "blocking" : sublotFlags.length ? "needs_review" : null;
+        const reasonText = sublotFlags.map((f) => f.human_readable_reason).join("; ") || "flagged";
         sublotRows.appendChild(
-          el("tr", { class: sublot.flagged ? "flagged-row" : "" }, [
+          el("tr", { class: sublotFlags.length ? "flagged-row" : "" }, [
             el("td", { text: sublot.sublot_id || "—" }),
             el("td", { text: sublot.blend_pct != null ? String(sublot.blend_pct) : "—" }),
             el("td", { text: sublot.origin_country || "—" }),
             el("td", { text: sublot.origin_confidence || "—" }),
             el("td", { text: sublot.notes || "—" }),
             el("td", {}, [
-              sublot.flagged
-                ? el("span", { class: "tag tag-flagged", text: sublot.flagged_reason || "flagged" })
+              worstSeverity === "blocking"
+                ? el("span", { class: "tag tag-blocking", text: reasonText })
+                : worstSeverity
+                ? el("span", { class: "tag tag-flagged", text: reasonText })
                 : el("span", { class: "tag tag-found", text: "ok" }),
             ]),
           ])
