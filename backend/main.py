@@ -16,6 +16,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -38,6 +39,7 @@ from models import (
     CredentialResponse,
     DocumentDetail,
     DocumentUploadResponse,
+    FieldCorrectionRequest,
     HeatOut,
     HeatReviewRequest,
     LoginRequest,
@@ -58,17 +60,24 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _evaluate_sublot_flag(sublot: dict) -> list[dict]:
+def _evaluate_sublot_flag(sublot: dict, sublot_id: Optional[str] = None) -> list[dict]:
     """Deterministic sub-lot flagging, reusing passport.py's own banned-
     country list so extraction-time flagging and the compliance engine
     never disagree about what counts as covered. Returns structured
     review_flags.Flag dicts (source='compliance_engine') rather than a
-    bare reason string — same rules as before, just structured output."""
+    bare reason string — same rules as before, just structured output.
+
+    `sublot_id` is stamped onto the flag when the caller has one (a
+    persisted heat_sublots row id) — callers evaluating a not-yet-inserted
+    sub-lot (upload_document, review_heat, before their INSERT) pass None
+    and stamp it in themselves once the id exists; correct_field already
+    knows the row id and passes it straight through."""
     origin = (sublot.get("origin_country") or "").strip()
     if not origin:
         return [
             review_flags.make_flag(
-                "missing_field", "origin country not stated", source="compliance_engine", field_name="origin_country"
+                "missing_field", "origin country not stated", source="compliance_engine",
+                field_name="origin_country", sublot_id=sublot_id,
             ).model_dump()
         ]
     if origin.lower() in passport_engine.BANNED_ORIGIN_COUNTRIES:
@@ -78,6 +87,7 @@ def _evaluate_sublot_flag(sublot: dict) -> list[dict]:
                 f"origin country '{origin}' is FEOC-covered",
                 source="compliance_engine",
                 field_name="origin_country",
+                sublot_id=sublot_id,
             ).model_dump()
         ]
     if (sublot.get("origin_confidence") or "").lower() == "low":
@@ -87,9 +97,111 @@ def _evaluate_sublot_flag(sublot: dict) -> list[dict]:
                 "origin confidence marked low",
                 source="compliance_engine",
                 field_name="origin_confidence",
+                sublot_id=sublot_id,
             ).model_dump()
         ]
     return []
+
+
+# Field-level correction allowlist: field_name -> (column, python type).
+# Deliberately scalar-only — alloy_composition/test_results/nonconformance_refs
+# stay on the full-replace review form (HeatReviewRequest); those are
+# structured/nested and the LLM's flags never target them by field_name
+# anyway (see llm_extractor.FLAG_SCHEMA's field_name description).
+_HEAT_CORRECTABLE_FIELDS: dict[str, type] = {"heat_id": str, "mass_kg": float}
+_SUBLOT_CORRECTABLE_FIELDS: dict[str, type] = {
+    "sublot_id": str,
+    "blend_pct": float,
+    "origin_country": str,
+    "origin_confidence": str,
+    "notes": str,
+}
+
+
+def _coerce_corrected_value(raw: Optional[str], field_type: type):
+    if raw is None or raw == "":
+        return None
+    if field_type is float:
+        try:
+            return float(raw)
+        except ValueError:
+            raise HTTPException(400, f"'{raw}' is not a valid number")
+    return raw
+
+
+def _resolve_open_flags_for_field(flags: list[dict], field_name: str, actor: str, resolved_at: str) -> bool:
+    """Marks every open flag about `field_name` resolved, in place.
+    Returns whether anything changed (useful only for tests/debugging;
+    callers recompute openness from the list itself afterward)."""
+    changed = False
+    for f in flags:
+        if f.get("field_name") == field_name and f.get("status", "open") == "open":
+            f["status"] = "resolved"
+            f["resolved_by"] = actor
+            f["resolved_at"] = resolved_at
+            changed = True
+    return changed
+
+
+def _any_open(flags: list[dict]) -> bool:
+    return any(f.get("status", "open") == "open" for f in flags)
+
+
+def _heat_own_flags(heat_flags: list[dict]) -> list[dict]:
+    """document_heats.flags_json is written at upload/`/review` time as
+    extraction_flags + a flattened copy of every sub-lot's
+    compliance_engine flags (see upload_document). Aggregation
+    (flagged_for_review, fully_addressed) never trusts those flattened
+    copies — correct_field keeps them in sync for *display* (see
+    _resolve_open_sublot_duplicate_flags below, which can now do that
+    precisely because compliance_engine flags carry sublot_id), but
+    sub-lot rows stay the sole source of truth for whether a heat is
+    actually addressed. Belt and suspenders: even a stale or
+    legacy (pre-sublot_id) duplicate sitting here can never block a
+    heat from reading as addressed once the owning sub-lot is fixed."""
+    return [f for f in heat_flags if f.get("source") != "compliance_engine"]
+
+
+def _resolve_open_sublot_duplicate_flags(
+    heat_flags: list[dict], field_name: str, sublot_id: str, actor: str, resolved_at: str
+) -> bool:
+    """Resolves document_heats.flags_json's flattened copy of one
+    specific sub-lot's flag. Requires an exact sublot_id match (not just
+    field_name), which is what makes this safe now that compliance_engine
+    flags carry sublot_id — correcting one sub-lot can no longer resolve
+    a sibling sub-lot's still-open flag of the identical shape. Legacy
+    flags written before sublot_id existed have sublot_id=None, which
+    never matches a real row id, so they're left alone rather than
+    guessed at (they just fall back on _heat_own_flags excluding them
+    from aggregation, same as before this fix)."""
+    changed = False
+    for f in heat_flags:
+        if f.get("field_name") == field_name and f.get("sublot_id") == sublot_id and f.get("status", "open") == "open":
+            f["status"] = "resolved"
+            f["resolved_by"] = actor
+            f["resolved_at"] = resolved_at
+            changed = True
+    return changed
+
+
+def _append_fresh_flags(flags: list[dict], fresh_flags: list[dict], match_sublot: bool) -> None:
+    """Appends each freshly re-evaluated flag unless an open flag of the
+    identical shape is already present, so re-running the check against
+    an unchanged corrected value doesn't pile up duplicate entries.
+    `match_sublot=True` additionally requires sublot_id to match — used
+    against the heat-level flattened list, where more than one sub-lot's
+    flags coexist and content alone can't tell them apart."""
+    for fresh in fresh_flags:
+        duplicate_open = any(
+            f.get("status", "open") == "open"
+            and f["issue_type"] == fresh["issue_type"]
+            and f["field_name"] == fresh["field_name"]
+            and f["human_readable_reason"] == fresh["human_readable_reason"]
+            and (not match_sublot or f.get("sublot_id") == fresh.get("sublot_id"))
+            for f in flags
+        )
+        if not duplicate_open:
+            flags.append(dict(fresh))
 
 
 def _row_to_sublot(row) -> SublotOut:
@@ -111,6 +223,9 @@ def _fetch_sublots(conn, heat_id: str) -> list[SublotOut]:
 
 
 def _row_to_heat(conn, row) -> HeatOut:
+    sublots = _fetch_sublots(conn, row["id"])
+    heat_flags = json.loads(row["flags_json"])
+    any_open = _any_open(_heat_own_flags(heat_flags)) or any(f.status == "open" for s in sublots for f in s.flags)
     return HeatOut(
         id=row["id"],
         document_id=row["document_id"],
@@ -126,12 +241,13 @@ def _row_to_heat(conn, row) -> HeatOut:
         source=row["source"],
         extraction_source=row["extraction_source"],
         flagged_for_review=bool(row["flagged_for_review"]),
-        flags=json.loads(row["flags_json"]),
+        flags=heat_flags,
         reviewed=bool(row["reviewed"]),
         reviewed_by=row["reviewed_by"],
         reviewed_at=row["reviewed_at"],
         credential_id=row["credential_id"],
-        sublots=_fetch_sublots(conn, row["id"]),
+        sublots=sublots,
+        fully_addressed=not any_open,
     )
 
 
@@ -287,7 +403,14 @@ async def upload_document(
 
     for heat in structured["heats"]:
         sublots = heat.get("feedstock_sublots") or []
-        sublot_flag_lists = [_evaluate_sublot_flag(s) for s in sublots]  # list[list[dict]], compliance_engine
+        # Row ids generated up front (rather than inline in the INSERT
+        # below) so _evaluate_sublot_flag can stamp each flag with the
+        # sub-lot id it actually belongs to — see review_flags.Flag's
+        # sublot_id field.
+        sublot_ids = [uuid.uuid4().hex for _ in sublots]
+        sublot_flag_lists = [
+            _evaluate_sublot_flag(s, sublot_id=sid) for s, sid in zip(sublots, sublot_ids)
+        ]  # list[list[dict]], compliance_engine
         extraction_flags = heat.get("flags") or []  # source='extraction', from the LLM/regex path
         heat_flags = extraction_flags + [f for flist in sublot_flag_lists for f in flist]
         heat_flagged = bool(heat_flags)
@@ -315,14 +438,14 @@ async def upload_document(
                 json.dumps(heat_flags),
             ),
         )
-        for sublot, sublot_flags in zip(sublots, sublot_flag_lists, strict=True):
+        for sid, sublot, sublot_flags in zip(sublot_ids, sublots, sublot_flag_lists, strict=True):
             conn.execute(
                 """
                 INSERT INTO heat_sublots (id, heat_id, sublot_id, blend_pct, origin_country, origin_confidence, notes, flagged, flags_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    uuid.uuid4().hex, heat_row_id, sublot.get("sublot_id"), sublot.get("blend_pct"),
+                    sid, heat_row_id, sublot.get("sublot_id"), sublot.get("blend_pct"),
                     sublot.get("origin_country"), sublot.get("origin_confidence"), sublot.get("notes"),
                     1 if sublot_flags else 0, json.dumps(sublot_flags),
                 ),
@@ -400,7 +523,8 @@ def review_heat(
         raise HTTPException(409, "heat already reviewed; a new review cycle is required to change it")
 
     sublot_dicts = [s.model_dump() for s in body.sublots]
-    sublot_flag_lists = [_evaluate_sublot_flag(s) for s in sublot_dicts]
+    sublot_ids = [uuid.uuid4().hex for _ in sublot_dicts]
+    sublot_flag_lists = [_evaluate_sublot_flag(s, sublot_id=sid) for s, sid in zip(sublot_dicts, sublot_ids)]
     heat_flags = [f for flist in sublot_flag_lists for f in flist]
     still_flagged = bool(heat_flags)
 
@@ -431,14 +555,14 @@ def review_heat(
         ),
     )
     conn.execute("DELETE FROM heat_sublots WHERE heat_id = ?", (heat_id,))
-    for sublot, sublot_flags in zip(sublot_dicts, sublot_flag_lists, strict=True):
+    for sid, sublot, sublot_flags in zip(sublot_ids, sublot_dicts, sublot_flag_lists, strict=True):
         conn.execute(
             """
             INSERT INTO heat_sublots (id, heat_id, sublot_id, blend_pct, origin_country, origin_confidence, notes, flagged, flags_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                uuid.uuid4().hex, heat_id, sublot["sublot_id"], sublot["blend_pct"],
+                sid, heat_id, sublot["sublot_id"], sublot["blend_pct"],
                 sublot["origin_country"], sublot["origin_confidence"], sublot["notes"],
                 1 if sublot_flags else 0, json.dumps(sublot_flags),
             ),
@@ -448,6 +572,157 @@ def review_heat(
 
     updated = conn.execute("SELECT * FROM document_heats WHERE id = ?", (heat_id,)).fetchone()
     return _row_to_heat(conn, updated)
+
+
+@app.post("/documents/{document_id}/heats/{heat_id}/correct", response_model=HeatOut)
+def correct_field(
+    document_id: str,
+    heat_id: str,
+    body: FieldCorrectionRequest,
+    current_user: dict = Depends(auth.get_current_user),
+    conn=Depends(get_db),
+):
+    """Corrects one field in place — unlike /review, this is allowed any
+    number of times and regardless of the heat's `reviewed` lock, since a
+    correction is its own audited event, not a re-review. A resolved flag
+    is kept (status flips to 'resolved'), never deleted, and a sub-lot
+    correction re-runs the same deterministic check extraction/`/review`
+    use, so a corrected origin_country picks up a fresh compliance_violation
+    flag exactly as if it had been that way from the start."""
+    auth.require_role(current_user, "org_user")
+    doc = conn.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
+    if doc is None:
+        raise HTTPException(404, "document not found")
+    auth.require_org_match(current_user, doc["org_id"])
+    heat = conn.execute(
+        "SELECT * FROM document_heats WHERE id = ? AND document_id = ?", (heat_id, document_id)
+    ).fetchone()
+    if heat is None:
+        raise HTTPException(404, "heat not found")
+
+    actor = current_user["email"]
+    corrected_at = now_iso()
+    sublot_row_id = None
+
+    if body.target == "heat":
+        if body.field_name not in _HEAT_CORRECTABLE_FIELDS:
+            raise HTTPException(400, f"heat field '{body.field_name}' cannot be corrected here")
+        previous_value = heat[body.field_name]
+        corrected_value = _coerce_corrected_value(body.corrected_value, _HEAT_CORRECTABLE_FIELDS[body.field_name])
+
+        heat_flags = json.loads(heat["flags_json"])
+        _resolve_open_flags_for_field(heat_flags, body.field_name, actor, corrected_at)
+        sibling_sublot_rows = conn.execute("SELECT flags_json FROM heat_sublots WHERE heat_id = ?", (heat_id,)).fetchall()
+        heat_still_flagged = _any_open(_heat_own_flags(heat_flags)) or any(
+            _any_open(json.loads(r["flags_json"])) for r in sibling_sublot_rows
+        )
+
+        conn.execute(
+            f"""
+            UPDATE document_heats
+            SET {body.field_name} = ?, source = 'human', flags_json = ?, flagged_for_review = ?
+            WHERE id = ?
+            """,
+            (corrected_value, json.dumps(heat_flags), 1 if heat_still_flagged else 0, heat_id),
+        )
+    else:
+        if body.sublot_id is None:
+            raise HTTPException(400, "sublot_id is required when target is 'sublot'")
+        if body.field_name not in _SUBLOT_CORRECTABLE_FIELDS:
+            raise HTTPException(400, f"sub-lot field '{body.field_name}' cannot be corrected here")
+        sublot = conn.execute(
+            "SELECT * FROM heat_sublots WHERE id = ? AND heat_id = ?", (body.sublot_id, heat_id)
+        ).fetchone()
+        if sublot is None:
+            raise HTTPException(404, "sub-lot not found")
+        previous_value = sublot[body.field_name]
+        corrected_value = _coerce_corrected_value(body.corrected_value, _SUBLOT_CORRECTABLE_FIELDS[body.field_name])
+
+        sublot_flags = json.loads(sublot["flags_json"])
+        _resolve_open_flags_for_field(sublot_flags, body.field_name, actor, corrected_at)
+
+        # Re-run the same deterministic check extraction/`/review` use,
+        # against the corrected value — this is what makes a corrected
+        # origin_country pick up (or drop) a compliance_violation flag
+        # live, rather than just clearing whatever was flagged before.
+        updated_sublot = dict(sublot)
+        updated_sublot[body.field_name] = corrected_value
+        fresh_flags = _evaluate_sublot_flag(updated_sublot, sublot_id=body.sublot_id)
+        _append_fresh_flags(sublot_flags, fresh_flags, match_sublot=False)
+        sublot_still_flagged = _any_open(sublot_flags)
+
+        conn.execute(
+            f"UPDATE heat_sublots SET {body.field_name} = ?, flags_json = ?, flagged = ? WHERE id = ?",
+            (corrected_value, json.dumps(sublot_flags), 1 if sublot_still_flagged else 0, body.sublot_id),
+        )
+
+        # document_heats.flags_json holds a flattened copy of this same
+        # flag (see upload_document/review_heat) — now that compliance_engine
+        # flags carry sublot_id, that copy can be resolved/refreshed
+        # precisely, without risking touching a sibling sub-lot's flag of
+        # the identical shape. flagged_for_review itself still never
+        # trusts this list directly (_heat_own_flags), only the sub-lot
+        # rows queried below — this sync is for accurate display only.
+        heat_flags = json.loads(heat["flags_json"])
+        _resolve_open_sublot_duplicate_flags(heat_flags, body.field_name, body.sublot_id, actor, corrected_at)
+        _append_fresh_flags(heat_flags, fresh_flags, match_sublot=True)
+
+        all_sublot_rows = conn.execute("SELECT flags_json FROM heat_sublots WHERE heat_id = ?", (heat_id,)).fetchall()
+        heat_still_flagged = _any_open(_heat_own_flags(heat_flags)) or any(
+            _any_open(json.loads(r["flags_json"])) for r in all_sublot_rows
+        )
+        conn.execute(
+            "UPDATE document_heats SET source = 'human', flags_json = ?, flagged_for_review = ? WHERE id = ?",
+            (json.dumps(heat_flags), 1 if heat_still_flagged else 0, heat_id),
+        )
+        sublot_row_id = body.sublot_id
+
+    audit.record(
+        conn, "document_heat", heat_id, "field_corrected", actor=actor,
+        detail={
+            "target": body.target,
+            "sublot_id": sublot_row_id,
+            "field_name": body.field_name,
+            "previous_value": previous_value,
+            "corrected_value": corrected_value,
+        },
+    )
+    conn.commit()
+
+    updated = conn.execute("SELECT * FROM document_heats WHERE id = ?", (heat_id,)).fetchone()
+    return _row_to_heat(conn, updated)
+
+
+@app.get("/documents/{document_id}/heats/{heat_id}/audit-trail")
+def get_heat_audit_trail(
+    document_id: str,
+    heat_id: str,
+    current_user: dict = Depends(auth.get_current_user),
+    conn=Depends(get_db),
+):
+    """Reviewed/corrected events for one heat, independent of whether a
+    credential has been issued from it yet — the review-queue UI shows
+    this directly under the heat card, so a reviewer can confirm a
+    correction landed without first issuing a credential just to reach
+    /credentials/{id}/audit-trail's Timeline."""
+    auth.require_role(current_user, "org_user", "platform_admin")
+    doc = conn.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
+    if doc is None:
+        raise HTTPException(404, "document not found")
+    auth.require_org_match(current_user, doc["org_id"])
+    heat = conn.execute(
+        "SELECT id FROM document_heats WHERE id = ? AND document_id = ?", (heat_id, document_id)
+    ).fetchone()
+    if heat is None:
+        raise HTTPException(404, "heat not found")
+    rows = conn.execute(
+        "SELECT action, actor, detail_json, created_at FROM audit_log WHERE entity_type = 'document_heat' AND entity_id = ? ORDER BY created_at",
+        (heat_id,),
+    ).fetchall()
+    return [
+        {"action": r["action"], "actor": r["actor"], "detail": json.loads(r["detail_json"] or "{}"), "created_at": r["created_at"]}
+        for r in rows
+    ]
 
 
 # --- issuers / credentials -------------------------------------------------
@@ -624,6 +899,7 @@ def get_audit_trail(credential_id: str, current_user: dict = Depends(auth.get_cu
     ).fetchall()
 
     document_audit_rows = []
+    heat_audit_rows = []
     heat_out = None
     if credential["document_id"]:
         document_audit_rows = conn.execute(
@@ -633,6 +909,14 @@ def get_audit_trail(credential_id: str, current_user: dict = Depends(auth.get_cu
         heat_row = conn.execute("SELECT * FROM document_heats WHERE credential_id = ?", (credential_id,)).fetchone()
         if heat_row is not None:
             heat_out = _row_to_heat(conn, heat_row).model_dump()
+            # Reviewed/field_corrected events — same entity_type='document_heat'
+            # rows /documents/{id}/heats/{id}/audit-trail reads, so a
+            # correction made before this credential ever existed still
+            # shows up here once one is issued.
+            heat_audit_rows = conn.execute(
+                "SELECT action, actor, detail_json, created_at FROM audit_log WHERE entity_type = 'document_heat' AND entity_id = ? ORDER BY created_at",
+                (heat_row["id"],),
+            ).fetchall()
 
     return {
         "credential_id": credential_id,
@@ -643,6 +927,10 @@ def get_audit_trail(credential_id: str, current_user: dict = Depends(auth.get_cu
         "document_audit_log": [
             {"action": r["action"], "actor": r["actor"], "detail": json.loads(r["detail_json"] or "{}"), "created_at": r["created_at"]}
             for r in document_audit_rows
+        ],
+        "heat_audit_log": [
+            {"action": r["action"], "actor": r["actor"], "detail": json.loads(r["detail_json"] or "{}"), "created_at": r["created_at"]}
+            for r in heat_audit_rows
         ],
         "heat": heat_out,
     }

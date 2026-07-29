@@ -1,0 +1,437 @@
+"""Field-level correction workflow: a reviewer fixes one flagged field in
+place (POST .../correct) rather than resubmitting the whole heat via
+/review. Covers: the corresponding flag resolves (not deleted), a
+sub-lot correction re-runs the deterministic compliance check against
+the corrected value, `flagged`/`flagged_for_review`/`fully_addressed`
+recompute from open flags only, the correction is audited, and
+correction is allowed independently of the one-shot /review lock.
+
+Same TestClient + dependency-override pattern as test_heats.py.
+"""
+import sqlite3
+
+import pytest
+from fastapi.testclient import TestClient
+
+import auth
+import crypto_utils
+import llm_extractor
+import main
+import storage
+from db import SCHEMA
+
+MTR_TEXT = (
+    "CERTIFICATE OF CONFORMANCE / MILL TEST REPORT\n"
+    "Supplier: Test Recycler, LLC\n"
+    "Material: Sintered NdFeB Magnet Alloy (N42)\n"
+    "Country of Origin: United States\n"
+    "Batch Mass: 50.0 kg\n"
+)  # deliberately no "Heat Number:" line -> regex fallback flags heat_id missing
+
+
+@pytest.fixture
+def conn(tmp_path, monkeypatch):
+    monkeypatch.setattr(crypto_utils, "KEYS_DIR", tmp_path / "keys")
+    monkeypatch.setattr(storage, "OBJECTS_DIR", tmp_path / "objects")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    c = sqlite3.connect(":memory:", check_same_thread=False)
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA foreign_keys = ON")
+    c.executescript(SCHEMA)
+    yield c
+    c.close()
+
+
+@pytest.fixture
+def client(conn):
+    def override_get_db():
+        yield conn
+
+    main.app.dependency_overrides[main.get_db] = override_get_db
+    yield TestClient(main.app)
+    main.app.dependency_overrides.clear()
+
+
+def make_issuer(conn, name="Test Org"):
+    issuer_id = "issuer-" + name.lower().replace(" ", "-")
+    public_key_b64, private_key_path = crypto_utils.generate_issuer_keypair(issuer_id)
+    conn.execute(
+        "INSERT INTO issuers (id, name, public_key, private_key_path, created_at) VALUES (?, ?, ?, ?, ?)",
+        (issuer_id, name, public_key_b64, private_key_path, "2026-01-01T00:00:00Z"),
+    )
+    conn.commit()
+    return issuer_id
+
+
+def make_user(conn, email, password, role, org_id=None):
+    user_id = "user-" + email.split("@")[0]
+    conn.execute(
+        "INSERT INTO users (id, org_id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, org_id, email, auth.hash_password(password), role, "2026-01-01T00:00:00Z"),
+    )
+    conn.commit()
+    return user_id
+
+
+def _login_org_user(client, conn):
+    org_id = make_issuer(conn)
+    make_user(conn, "u@example.com", "pw", "org_user", org_id)
+    client.post("/auth/login", json={"email": "u@example.com", "password": "pw"})
+    return org_id
+
+
+def _upload(client, filename="mtr.txt", text=MTR_TEXT):
+    return client.post(
+        "/documents/upload",
+        files={"file": (filename, text.encode(), "text/plain")},
+        data={"document_type": "mtr_coc"},
+    )
+
+
+def _upload_mocked(client, monkeypatch, heats):
+    def fake_extract_structured(raw_text):
+        return {"certificate_id": "CERT-1", "supplier_id": "Rio Grande Magnetics, LLC", "signatures": [], "heats": heats}
+
+    monkeypatch.setattr(llm_extractor, "extract_structured", fake_extract_structured)
+    return client.post(
+        "/documents/upload",
+        files={"file": ("complex.txt", b"irrelevant, extraction is mocked", "text/plain")},
+        data={"document_type": "mtr_coc"},
+    )
+
+
+def _missing_heat_id_heat():
+    return {
+        "heat_id": None,
+        "alloy_composition": {"Nd": 29.6, "Fe": 68.1, "B": 1.0},
+        "test_results": None,
+        "nonconformance_refs": [],
+        "feedstock_sublots": [
+            {"sublot_id": None, "blend_pct": 100.0, "origin_country": "United States", "origin_confidence": "high", "notes": None}
+        ],
+        "segregation_attested": True,
+        "segregation_note": "Dedicated line.",
+        "mass_kg": 178.0,
+        "confidence": 0.9,
+        "flags": [
+            {
+                "issue_type": "missing_field",
+                "field_name": "heat_id",
+                "severity": "needs_review",
+                "human_readable_reason": "no heat/melt number stated on the certificate",
+                "source": "extraction",
+            }
+        ],
+        "source": "llm",
+    }
+
+
+def _two_missing_origin_sublots_heat():
+    """Two sub-lots on one heat, both missing origin_country — the
+    compliance_engine flag _evaluate_sublot_flag produces for each is
+    byte-for-byte identical in shape (same issue_type/field_name/reason).
+    Before sublot_id existed on Flag, document_heats.flags_json's
+    flattened copy of these two flags was indistinguishable; this is the
+    exact scenario that made resolving one sub-lot's copy there unsafe."""
+    return {
+        "heat_id": "H-MULTI",
+        "alloy_composition": {"Nd": 29.2, "Fe": 68.5, "B": 1.0},
+        "test_results": None,
+        "nonconformance_refs": [],
+        "feedstock_sublots": [
+            {"sublot_id": "B1", "blend_pct": 65.0, "origin_country": None, "origin_confidence": None, "notes": "pending"},
+            {"sublot_id": "B2", "blend_pct": 35.0, "origin_country": None, "origin_confidence": None, "notes": "pending"},
+        ],
+        "segregation_attested": False,
+        "segregation_note": None,
+        "mass_kg": 95.0,
+        "confidence": 0.85,
+        "flags": [],
+        "source": "llm",
+    }
+
+
+def _missing_origin_heat():
+    """Sub-lot with no stated origin — main.py's own deterministic
+    _evaluate_sublot_flag (source='compliance_engine') is what flags
+    this, independent of whatever the LLM did or didn't notice, so this
+    doesn't need a mocked LLM `flags` entry to exercise the compliance
+    engine's field_name='origin_country' flag."""
+    return {
+        "heat_id": "H-1",
+        "alloy_composition": {"Nd": 29.5, "Fe": 68.2, "B": 1.0},
+        "test_results": None,
+        "nonconformance_refs": [],
+        "feedstock_sublots": [
+            {"sublot_id": "U1", "blend_pct": 100.0, "origin_country": None, "origin_confidence": None, "notes": "broker-sourced, documentation pending"}
+        ],
+        "segregation_attested": True,
+        "segregation_note": "Dedicated line.",
+        "mass_kg": 152.0,
+        "confidence": 0.7,
+        "flags": [],
+        "source": "llm",
+    }
+
+
+# --- heat-level field correction --------------------------------------------
+
+
+def test_correct_heat_field_resolves_matching_flag(client, conn, monkeypatch):
+    _login_org_user(client, conn)
+    upload = _upload_mocked(client, monkeypatch, [_missing_heat_id_heat()]).json()
+    doc_id = upload["id"]
+    heat = upload["heats"][0]
+    assert heat["heat_id"] is None
+    missing_flag = next(f for f in heat["flags"] if f["field_name"] == "heat_id")
+    assert missing_flag["status"] == "open"
+    assert heat["fully_addressed"] is False
+
+    resp = client.post(
+        f"/documents/{doc_id}/heats/{heat['id']}/correct",
+        json={"target": "heat", "field_name": "heat_id", "corrected_value": "TR-0001"},
+    )
+    assert resp.status_code == 200
+    updated = resp.json()
+    assert updated["heat_id"] == "TR-0001"
+    assert updated["source"] == "human"
+
+    resolved = next(f for f in updated["flags"] if f["field_name"] == "heat_id")
+    assert resolved["status"] == "resolved"
+    assert resolved["resolved_by"] == "u@example.com"
+    assert resolved["resolved_at"] is not None
+    # kept, not deleted
+    assert len(updated["flags"]) == len(heat["flags"])
+    assert updated["flagged_for_review"] is False
+    assert updated["fully_addressed"] is True
+
+
+def test_correct_heat_field_rejects_unknown_field(client, conn):
+    _login_org_user(client, conn)
+    upload = _upload(client).json()
+    doc_id = upload["id"]
+    heat_id = upload["heats"][0]["id"]
+
+    resp = client.post(
+        f"/documents/{doc_id}/heats/{heat_id}/correct",
+        json={"target": "heat", "field_name": "alloy_composition", "corrected_value": "{}"},
+    )
+    assert resp.status_code == 400
+
+
+def test_correction_allowed_after_heat_reviewed_lock(client, conn):
+    """Unlike /review (409 on a second call), /correct isn't a one-shot
+    workflow — a reviewer can fix a field after the heat is otherwise
+    locked, since it's an audited correction, not a re-review."""
+    _login_org_user(client, conn)
+    upload = _upload(client).json()
+    doc_id = upload["id"]
+    heat_id = upload["heats"][0]["id"]
+
+    client.post(
+        f"/documents/{doc_id}/heats/{heat_id}/review",
+        json={"heat_id": "TR-0001", "mass_kg": 50.0, "sublots": [{"origin_country": "United States", "origin_confidence": "high", "blend_pct": 100.0}]},
+    )
+    again = client.post(f"/documents/{doc_id}/heats/{heat_id}/review", json={"sublots": []})
+    assert again.status_code == 409
+
+    resp = client.post(
+        f"/documents/{doc_id}/heats/{heat_id}/correct",
+        json={"target": "heat", "field_name": "mass_kg", "corrected_value": "55.0"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["mass_kg"] == 55.0
+
+
+# --- sub-lot correction re-runs the compliance check ------------------------
+
+
+def test_correct_sublot_origin_to_covered_country_flips_to_blocking(client, conn, monkeypatch):
+    _login_org_user(client, conn)
+    upload = _upload_mocked(client, monkeypatch, [_missing_origin_heat()]).json()
+    doc_id = upload["id"]
+    heat = upload["heats"][0]
+    sublot = heat["sublots"][0]
+    assert sublot["flags"][0]["issue_type"] == "missing_field"
+    assert sublot["flags"][0]["source"] == "compliance_engine"
+
+    resp = client.post(
+        f"/documents/{doc_id}/heats/{heat['id']}/correct",
+        json={"target": "sublot", "sublot_id": sublot["id"], "field_name": "origin_country", "corrected_value": "China"},
+    )
+    assert resp.status_code == 200
+    updated = resp.json()
+    updated_sublot = updated["sublots"][0]
+    assert updated_sublot["origin_country"] == "China"
+    assert updated_sublot["flagged"] is True
+
+    # the old flag on origin_country is resolved, not gone
+    origin_country_flags = [f for f in updated_sublot["flags"] if f["field_name"] == "origin_country"]
+    assert any(f["status"] == "resolved" and f["issue_type"] == "missing_field" for f in origin_country_flags)
+    # a fresh, open compliance_violation flag was produced by re-running
+    # the deterministic check against the corrected value
+    fresh = next(f for f in origin_country_flags if f["status"] == "open")
+    assert fresh["issue_type"] == "compliance_violation"
+    assert fresh["severity"] == "blocking"
+    assert fresh["source"] == "compliance_engine"
+
+    assert updated["flagged_for_review"] is True
+    assert updated["fully_addressed"] is False
+
+
+def test_correct_sublot_fully_clears_flags(client, conn, monkeypatch):
+    _login_org_user(client, conn)
+    upload = _upload_mocked(client, monkeypatch, [_missing_origin_heat()]).json()
+    doc_id = upload["id"]
+    heat = upload["heats"][0]
+    sublot = heat["sublots"][0]
+
+    resp = client.post(
+        f"/documents/{doc_id}/heats/{heat['id']}/correct",
+        json={"target": "sublot", "sublot_id": sublot["id"], "field_name": "origin_country", "corrected_value": "United States"},
+    )
+    assert resp.status_code == 200
+    updated = resp.json()
+    updated_sublot = updated["sublots"][0]
+    assert updated_sublot["flagged"] is False
+    assert all(f["status"] == "resolved" for f in updated_sublot["flags"])
+    assert updated["flagged_for_review"] is False
+    assert updated["fully_addressed"] is True
+
+
+def test_correct_sublot_requires_sublot_id(client, conn, monkeypatch):
+    _login_org_user(client, conn)
+    upload = _upload_mocked(client, monkeypatch, [_missing_origin_heat()]).json()
+    doc_id = upload["id"]
+    heat_id = upload["heats"][0]["id"]
+
+    resp = client.post(
+        f"/documents/{doc_id}/heats/{heat_id}/correct",
+        json={"target": "sublot", "field_name": "origin_country", "corrected_value": "China"},
+    )
+    assert resp.status_code == 400
+
+
+def test_correct_one_sublot_does_not_affect_sibling_sublots_identical_flag(client, conn, monkeypatch):
+    """The regression this sublot_id fix targets: two sub-lots on the
+    same heat both flagged missing_field/origin_country — an identical
+    flag shape. Correcting B1 must resolve only B1's flag (in both its
+    own flags list and the heat-level flattened copy), leaving B2's
+    still-open flag completely untouched and still attributed to B2."""
+    _login_org_user(client, conn)
+    upload = _upload_mocked(client, monkeypatch, [_two_missing_origin_sublots_heat()]).json()
+    doc_id = upload["id"]
+    heat = upload["heats"][0]
+    # _fetch_sublots orders by the sub-lot's own (random) row id, not
+    # insertion order — match by label, not position.
+    b1 = next(s for s in heat["sublots"] if s["sublot_id"] == "B1")
+    b2 = next(s for s in heat["sublots"] if s["sublot_id"] == "B2")
+    assert b1["flags"][0]["status"] == "open" and b1["flags"][0]["sublot_id"] == b1["id"]
+    assert b2["flags"][0]["status"] == "open" and b2["flags"][0]["sublot_id"] == b2["id"]
+    # heat-level flattened copy has both, identical in shape apart from sublot_id
+    heat_origin_flags = [f for f in heat["flags"] if f["field_name"] == "origin_country"]
+    assert len(heat_origin_flags) == 2
+    assert {f["sublot_id"] for f in heat_origin_flags} == {b1["id"], b2["id"]}
+
+    resp = client.post(
+        f"/documents/{doc_id}/heats/{heat['id']}/correct",
+        json={"target": "sublot", "sublot_id": b1["id"], "field_name": "origin_country", "corrected_value": "United States"},
+    )
+    assert resp.status_code == 200
+    updated = resp.json()
+    updated_b1 = next(s for s in updated["sublots"] if s["id"] == b1["id"])
+    updated_b2 = next(s for s in updated["sublots"] if s["id"] == b2["id"])
+
+    # B1: resolved on its own sub-lot row
+    assert updated_b1["flagged"] is False
+    assert updated_b1["flags"][0]["status"] == "resolved"
+    assert updated_b1["flags"][0]["resolved_by"] == "u@example.com"
+
+    # B2: completely untouched, still open, still correctly attributed
+    assert updated_b2["flagged"] is True
+    assert len(updated_b2["flags"]) == 1
+    assert updated_b2["flags"][0]["status"] == "open"
+    assert updated_b2["flags"][0]["resolved_by"] is None
+    assert updated_b2["flags"][0]["sublot_id"] == b2["id"]
+
+    # heat-level flattened copy: B1's copy resolved, B2's copy still open —
+    # this is the part that used to be ambiguous without sublot_id
+    heat_origin_flags = [f for f in updated["flags"] if f["field_name"] == "origin_country"]
+    assert len(heat_origin_flags) == 2
+    b1_copy = next(f for f in heat_origin_flags if f["sublot_id"] == b1["id"])
+    b2_copy = next(f for f in heat_origin_flags if f["sublot_id"] == b2["id"])
+    assert b1_copy["status"] == "resolved"
+    assert b2_copy["status"] == "open"
+
+    # heat still flagged overall (B2 unresolved) and not fully addressed
+    assert updated["flagged_for_review"] is True
+    assert updated["fully_addressed"] is False
+
+
+# --- fully_addressed vs. reviewed --------------------------------------------
+
+
+def test_fully_addressed_false_when_review_submitted_with_open_blocking_flag(client, conn):
+    """Reproduces the badge bug this feature fixes: submitting /review
+    always set reviewed=True even with a blocking flag still open.
+    fully_addressed must say "no" even though reviewed says "yes"."""
+    _login_org_user(client, conn)
+    upload = _upload(client).json()
+    doc_id = upload["id"]
+    heat_id = upload["heats"][0]["id"]
+
+    resp = client.post(
+        f"/documents/{doc_id}/heats/{heat_id}/review",
+        json={
+            "heat_id": "TR-0001",
+            "mass_kg": 50.0,
+            "sublots": [{"origin_country": "China", "origin_confidence": "high", "blend_pct": 100.0}],
+        },
+    )
+    reviewed = resp.json()
+    assert reviewed["reviewed"] is True
+    assert reviewed["flagged_for_review"] is True
+    assert reviewed["fully_addressed"] is False
+
+
+# --- audit trail --------------------------------------------------------------
+
+
+def test_correction_is_recorded_in_heat_audit_trail(client, conn):
+    _login_org_user(client, conn)
+    upload = _upload(client).json()
+    doc_id = upload["id"]
+    heat_id = upload["heats"][0]["id"]
+
+    client.post(
+        f"/documents/{doc_id}/heats/{heat_id}/correct",
+        json={"target": "heat", "field_name": "heat_id", "corrected_value": "TR-0001"},
+    )
+
+    trail = client.get(f"/documents/{doc_id}/heats/{heat_id}/audit-trail").json()
+    entry = next(e for e in trail if e["action"] == "field_corrected")
+    assert entry["actor"] == "u@example.com"
+    assert entry["detail"]["target"] == "heat"
+    assert entry["detail"]["field_name"] == "heat_id"
+    assert entry["detail"]["previous_value"] is None
+    assert entry["detail"]["corrected_value"] == "TR-0001"
+
+
+def test_correction_requires_org_match(client, conn):
+    org_a = make_issuer(conn, "Org A")
+    make_user(conn, "a@example.com", "pw", "org_user", org_a)
+    org_b = make_issuer(conn, "Org B")
+    make_user(conn, "b@example.com", "pw", "org_user", org_b)
+
+    client.post("/auth/login", json={"email": "a@example.com", "password": "pw"})
+    upload = _upload(client).json()
+    doc_id = upload["id"]
+    heat_id = upload["heats"][0]["id"]
+    client.post("/auth/logout")
+
+    client.post("/auth/login", json={"email": "b@example.com", "password": "pw"})
+    resp = client.post(
+        f"/documents/{doc_id}/heats/{heat_id}/correct",
+        json={"target": "heat", "field_name": "heat_id", "corrected_value": "TR-0001"},
+    )
+    assert resp.status_code == 403
