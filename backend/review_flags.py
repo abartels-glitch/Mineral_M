@@ -16,6 +16,24 @@ Severity is derived from issue_type, not set by callers: only a
 compliance_violation is `blocking` (a real, deterministic policy hit),
 everything else is `needs_review` (worth a human's eyes, not a known
 verdict).
+
+A flag also carries a resolution `status`. Once a human corrects the
+field a flag concerns (main.py's field-correction endpoint), the flag
+is marked `resolved` in place — it is never removed from the list,
+since "this was flagged and a human then fixed it" is itself
+compliance history worth keeping. New flags default to `open`;
+`resolved_by`/`resolved_at` stay null until resolution.
+
+A compliance_engine flag also carries `sublot_id` — which physical
+sub-lot row (heat_sublots.id) it's about. document_heats.flags_json
+holds a flattened copy of every sub-lot's flags alongside the heat's
+own (see main.py's upload_document), and without a sub-lot id two
+sub-lots on the same heat with the identical issue (e.g. both missing
+an origin) would be indistinguishable there — correcting one sub-lot
+could otherwise resolve the wrong copy. Extraction-sourced flags stay
+heat-scoped (`sublot_id=None`): the LLM's flag schema was never asked
+to name a specific sub-lot, and sub-lot rows don't have ids yet at the
+point extraction runs.
 """
 from typing import Literal, Optional
 
@@ -30,6 +48,7 @@ IssueType = Literal[
 ]
 Source = Literal["extraction", "compliance_engine"]
 Severity = Literal["blocking", "needs_review"]
+FlagStatus = Literal["open", "resolved"]
 
 ISSUE_TYPES: tuple[str, ...] = (
     "missing_field",
@@ -51,6 +70,10 @@ class Flag(BaseModel):
     severity: Severity
     human_readable_reason: str
     source: Source
+    status: FlagStatus = "open"
+    resolved_by: Optional[str] = None
+    resolved_at: Optional[str] = None
+    sublot_id: Optional[str] = None
 
 
 def severity_for(issue_type: str) -> Severity:
@@ -62,6 +85,7 @@ def make_flag(
     human_readable_reason: str,
     source: Source,
     field_name: Optional[str] = None,
+    sublot_id: Optional[str] = None,
 ) -> Flag:
     return Flag(
         issue_type=issue_type,
@@ -69,4 +93,5 @@ def make_flag(
         severity=severity_for(issue_type),
         human_readable_reason=human_readable_reason,
         source=source,
+        sublot_id=sublot_id,
     )

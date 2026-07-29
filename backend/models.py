@@ -38,6 +38,12 @@ class HeatOut(BaseModel):
     reviewed_at: Optional[str]
     credential_id: Optional[str]
     sublots: list[SublotOut]
+    # Derived, not stored: true iff no flag (this heat's own, or any of its
+    # sub-lots') is still open. Distinct from `reviewed` — that only means
+    # the one-shot review form was submitted once, which can happen while
+    # a blocking flag is still outstanding. The review-queue badge uses
+    # this (combined with `reviewed`) rather than `reviewed` alone.
+    fully_addressed: bool
 
 
 class DocumentUploadResponse(BaseModel):
@@ -84,6 +90,20 @@ class HeatReviewRequest(BaseModel):
     segregation_note: Optional[str] = None
     mass_kg: Optional[float] = None
     sublots: list[SublotInput] = []
+
+
+class FieldCorrectionRequest(BaseModel):
+    """One field, corrected in place — deliberately not the full-replace
+    shape HeatReviewRequest uses. A reviewer fixing a single flagged
+    field shouldn't have to resubmit everything else on the heat, and
+    (unlike HeatReviewRequest) this is allowed to run more than once and
+    after the heat is otherwise locked, since a correction is its own
+    audited event rather than a re-review."""
+
+    target: Literal["heat", "sublot"]
+    sublot_id: Optional[str] = None
+    field_name: str
+    corrected_value: Optional[str] = None
 
 
 class CredentialIssueRequest(BaseModel):
