@@ -1,0 +1,56 @@
+# DISABLED — renamed from ci.yml so GitHub Actions no longer picks this up
+# (only .yml/.yaml files directly in .github/workflows/ run).
+#
+# Every run on this repo (including the very first push) has failed
+# instantly — 0 workflow steps executed, no runner ever assigned, 0ms
+# billable runtime — before ruff/pytest ever got a chance to run. That's
+# an Actions infra/billing issue (most likely: no payment method on file
+# / spending limit blocking a private repo's included minutes), not a
+# code, lint, or test problem — confirmed via the GitHub API: Actions is
+# enabled for this repo, there's no branch protection depending on this
+# check, no other workflow/webhook/Pages config references it, and no
+# deployment step in this repo consumes its result.
+#
+# To re-enable once the Actions billing/infra issue is resolved: rename
+# this file back to ci.yml (the workflow content itself is unchanged and
+# was verified clean via a full fresh-environment reproduction — install,
+# lint, test — before this was disabled).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches local dev (see README) so CI can't pass/fail on a
+          # version difference that never gets caught locally.
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install ruff
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        # No secrets required: llm_extractor.py falls back to the regex
+        # extractor whenever ANTHROPIC_API_KEY is unset, so the full
+        # suite runs offline — nothing to configure in repo secrets.
+        run: pytest -q
