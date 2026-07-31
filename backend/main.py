@@ -126,7 +126,7 @@ def _coerce_corrected_value(raw: Optional[str], field_type: type):
         try:
             return float(raw)
         except ValueError:
-            raise HTTPException(400, f"'{raw}' is not a valid number")
+            raise HTTPException(400, f"'{raw}' is not a valid number") from None
     return raw
 
 
@@ -433,7 +433,7 @@ async def upload_document(
         # sublot_id field.
         sublot_ids = [uuid.uuid4().hex for _ in sublots]
         sublot_flag_lists = [
-            _evaluate_sublot_flag(s, sublot_id=sid) for s, sid in zip(sublots, sublot_ids)
+            _evaluate_sublot_flag(s, sublot_id=sid) for s, sid in zip(sublots, sublot_ids, strict=True)
         ]  # list[list[dict]], compliance_engine
         extraction_flags = heat.get("flags") or []  # source='extraction', from the LLM/regex path
         heat_flags = extraction_flags + [f for flist in sublot_flag_lists for f in flist]
@@ -569,7 +569,9 @@ def review_heat(
             sublot_is_update.append(False)
         claimed_ids.add(sublot_row_ids[-1])
 
-    sublot_flag_lists = [_evaluate_sublot_flag(s, sublot_id=sid) for s, sid in zip(sublot_dicts, sublot_row_ids)]
+    sublot_flag_lists = [
+        _evaluate_sublot_flag(s, sublot_id=sid) for s, sid in zip(sublot_dicts, sublot_row_ids, strict=True)
+    ]
     heat_flags = [f for flist in sublot_flag_lists for f in flist]
     still_flagged = bool(heat_flags)
 

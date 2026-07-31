@@ -157,7 +157,11 @@ def render_passport_pdf(
                 successor_uii = uii_codes.get(successor_id)
                 uii_note = f"UII {successor_uii}" if successor_uii and successor_uii != successor_id else "no UII on file"
                 story.append(
-                    Paragraph(f"Superseded by credential {successor_id[:12]}… ({uii_note}) — see that credential for the current valid record.", provenance_style)
+                    Paragraph(
+                        f"Superseded by credential {successor_id[:12]}… ({uii_note}) — "
+                        "see that credential for the current valid record.",
+                        provenance_style,
+                    )
                 )
             else:
                 story.append(Paragraph("No superseding credential has been issued yet.", provenance_style))
