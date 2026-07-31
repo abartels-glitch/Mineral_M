@@ -386,3 +386,52 @@ def test_composite_credential_sourcing_revoked_credential_shows_revoked(client, 
     assert component_node["node_status"] == "revoked"
     composite_node = next(n for n in after["nodes"] if n["credential_id"] == composite_id)
     assert composite_node["node_status"] == "pass"  # the composite itself was never touched
+
+
+def test_composite_with_one_of_two_sources_revoked_distinguishes_at_node_level(client, conn):
+    """The single-source cascade test above can't tell "one source
+    revoked" apart from "the only source revoked" — both look identical
+    at the verdict level. With two sources and only one corrected, the
+    top-level verdict still collapses to "revoked" (matching how "fail"
+    already collapses many possible failures into one verdict), but the
+    still-clean sibling source's own node must read "pass", not
+    "revoked" — proving the graph walk evaluates each source
+    independently rather than a blanket revoke propagating to every
+    node under the composite."""
+    _login_org_user(client, conn)
+    doc_a, heat_a, component_a = _upload_review_issue(client, filename="lot-a.txt", mass_kg=410.0)
+    doc_b, heat_b, component_b = _upload_review_issue(client, filename="lot-b.txt", mass_kg=165.0)
+
+    composite = client.post(
+        "/credentials/issue",
+        json={
+            "credential_type": "sintered_ndfeb_batch",
+            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
+            "sources": [component_a, component_b],
+            "segregation_attested": True,
+            "segregation_attested_by": "Maria Alvarez, QA Lead",
+            "segregation_note": "dedicated single-line sintering",
+        },
+    )
+    assert composite.status_code == 200, composite.text
+    composite_id = composite.json()["id"]
+
+    before = client.get(f"/passport/{composite_id}").json()
+    assert before["verdict"] == "pass"
+
+    # Revoke only component_a's source heat; component_b is untouched.
+    client.post(
+        f"/documents/{doc_a}/heats/{heat_a}/correct",
+        json={"target": "heat", "field_name": "mass_kg", "corrected_value": "405.0"},
+    )
+
+    after = client.get(f"/passport/{composite_id}").json()
+    assert after["verdict"] == "revoked"  # blanket at the verdict level, same as "fail" already does
+
+    node_a = next(n for n in after["nodes"] if n["credential_id"] == component_a)
+    node_b = next(n for n in after["nodes"] if n["credential_id"] == component_b)
+    composite_node = next(n for n in after["nodes"] if n["credential_id"] == composite_id)
+
+    assert node_a["node_status"] == "revoked"
+    assert node_b["node_status"] == "pass"  # the clean sibling source is NOT dragged down
+    assert composite_node["node_status"] == "pass"  # the composite itself was never touched
