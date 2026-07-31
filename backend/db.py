@@ -12,11 +12,19 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DB_PATH = DATA_DIR / "passport.db"
 
 SCHEMA = """
+-- `iac`/`enterprise_id` are the Issuing Agency Code and Enterprise
+-- Identifier this issuer is registered under (e.g. "UN" + a D-U-N-S
+-- number) — together they're the fixed prefix of every MIL-STD-130
+-- Construct #1 UII this issuer's credentials get (see uii.py). Both
+-- nullable: an issuer only needs them once it starts minting real UIIs,
+-- and existing/dev issuers predate the feature.
 CREATE TABLE IF NOT EXISTS issuers (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     public_key TEXT NOT NULL,
     private_key_path TEXT NOT NULL,
+    iac TEXT,
+    enterprise_id TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -215,12 +223,25 @@ def _migrate_credentials_heat_id(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE credentials ADD COLUMN heat_id TEXT REFERENCES document_heats(id)")
 
 
+def _migrate_issuers_uii_fields(conn: sqlite3.Connection) -> None:
+    """CREATE TABLE IF NOT EXISTS doesn't touch a table that already
+    exists on disk. Existing issuers get iac/enterprise_id = NULL — real
+    values have to be registered per-issuer before that issuer can mint
+    Construct #1 UIIs; there's no default to backfill."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(issuers)")}
+    if "iac" not in cols:
+        conn.execute("ALTER TABLE issuers ADD COLUMN iac TEXT")
+    if "enterprise_id" not in cols:
+        conn.execute("ALTER TABLE issuers ADD COLUMN enterprise_id TEXT")
+
+
 def init_db() -> None:
     conn = get_connection()
     try:
         conn.executescript(SCHEMA)
         _migrate_flags_json(conn)
         _migrate_credentials_heat_id(conn)
+        _migrate_issuers_uii_fields(conn)
         conn.commit()
     finally:
         conn.close()
