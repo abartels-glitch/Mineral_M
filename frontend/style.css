@@ -58,6 +58,7 @@ header {
 header h1 { font-size: 1.15rem; margin: 0; }
 header nav a { color: var(--muted); text-decoration: none; margin-left: 1rem; font-size: 0.9rem; }
 header nav a:hover { color: var(--text); }
+header nav a.active { color: var(--text); font-weight: 600; }
 
 main {
   max-width: 960px;

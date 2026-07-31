@@ -44,6 +44,47 @@ async function getCurrentUserOrNull() {
   }
 }
 
+// Renders the shared title+nav into <header id="header-root"></header> —
+// index.html/passport.html/scan.html each have that empty placeholder
+// instead of duplicating the markup. login.html has its own static
+// <header> with no #header-root, so this is a deliberate no-op there:
+// it's a pre-auth entry point that intentionally has no nav (see its
+// own markup) and shouldn't grow one just because app.js is loaded
+// everywhere.
+//
+// Composes with renderUserHeader() below via ordinary DOM ordering, not
+// any shared state: this runs synchronously as soon as app.js loads
+// (before any page's own inline <script> calls requireAuth()/
+// getCurrentUserOrNull()), so by the time renderUserHeader() later does
+// document.querySelector("header nav") and appends into it, that <nav>
+// already exists with this function's links inside it. Neither
+// function touches what the other wrote.
+function renderHeader() {
+  const root = document.getElementById("header-root");
+  if (!root) return;
+  // location.pathname is "/" (not "/index.html") when the app is loaded
+  // from the bare root — StaticFiles(html=True) serves index.html there
+  // without a redirect, so the URL bar never shows the .html path.
+  const currentPath = location.pathname === "/" ? "/index.html" : location.pathname;
+  const links = [
+    { href: "/index.html", text: "Review queue" },
+    { href: "/passport.html", text: "Passport lookup" },
+    { href: "/scan.html", text: "Scan" },
+  ];
+  root.appendChild(el("h1", { text: "FEOC Compliance Passport (MVP)" }));
+  root.appendChild(
+    el(
+      "nav",
+      {},
+      links.map((link) =>
+        el("a", { href: link.href, text: link.text, class: link.href === currentPath ? "active" : null })
+      )
+    )
+  );
+}
+
+renderHeader();
+
 function renderUserHeader(user) {
   const nav = document.querySelector("header nav");
   if (!nav) return;
