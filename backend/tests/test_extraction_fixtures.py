@@ -263,7 +263,13 @@ def test_missing_heat_number_fixture_flags_missing_field(client, conn, monkeypat
         assert "Heat No" not in raw_text
         return {
             "certificate_id": "RGM-CERT-2026-0501",
-            "supplier_id": "Rio Grande Magnetics, LLC",
+            # This fixture has two candidate supplier fields ("Supplier:
+            # Rio Grande Magnetics, LLC" and "Supplier ID: RGM-TX-01") —
+            # a live E2E run against the real model confirmed it picks
+            # the more specific "Supplier ID:" line, not the company
+            # name. Matches real behavior so this doesn't silently drift
+            # if the fixture or prompt changes later.
+            "supplier_id": "RGM-TX-01",
             "signatures": [],
             "heats": [
                 {

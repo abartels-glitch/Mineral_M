@@ -435,3 +435,110 @@ def test_correction_requires_org_match(client, conn):
         json={"target": "heat", "field_name": "heat_id", "corrected_value": "TR-0001"},
     )
     assert resp.status_code == 403
+
+
+# --- sub-lot row id stability across /review ----------------------------------
+# Found via a live E2E walkthrough: review_heat used to unconditionally drop
+# and reinsert every sub-lot row with a fresh id on every /review call. A
+# client that captured a sub-lot's id before /review (the only place ids are
+# visible pre-review) got a 404 "sub-lot not found" on a later /correct call,
+# with no indication it needed to refetch first.
+
+
+def test_sublot_id_stable_across_review_when_round_tripped(client, conn, monkeypatch):
+    """The regression test: capture a sub-lot's id before /review,
+    round-trip it in the /review submission, and confirm both that the
+    id survives unchanged and that a /correct call using that same
+    pre-review id still resolves — no refetch required."""
+    _login_org_user(client, conn)
+    upload = _upload_mocked(client, monkeypatch, [_missing_origin_heat()]).json()
+    doc_id = upload["id"]
+    heat_id = upload["heats"][0]["id"]
+    pre_review_sublot_id = upload["heats"][0]["sublots"][0]["id"]
+
+    reviewed = client.post(
+        f"/documents/{doc_id}/heats/{heat_id}/review",
+        json={
+            "heat_id": "H-1",
+            "mass_kg": 152.0,
+            "sublots": [
+                {
+                    "id": pre_review_sublot_id,
+                    "origin_country": "United States",
+                    "origin_confidence": "high",
+                    "blend_pct": 100.0,
+                }
+            ],
+        },
+    ).json()
+
+    assert reviewed["sublots"][0]["id"] == pre_review_sublot_id
+
+    resp = client.post(
+        f"/documents/{doc_id}/heats/{heat_id}/correct",
+        json={
+            "target": "sublot",
+            "sublot_id": pre_review_sublot_id,
+            "field_name": "origin_country",
+            "corrected_value": "China",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["sublots"][0]["origin_country"] == "China"
+
+
+def test_review_adds_new_sublot_without_id_gets_fresh_row(client, conn, monkeypatch):
+    """A sub-lot submitted with no id — the reviewer splitting a blend
+    into an extra sub-lot during review, say — is correctly treated as
+    new rather than confused with the existing row."""
+    _login_org_user(client, conn)
+    upload = _upload_mocked(client, monkeypatch, [_missing_origin_heat()]).json()
+    doc_id = upload["id"]
+    heat_id = upload["heats"][0]["id"]
+    existing_id = upload["heats"][0]["sublots"][0]["id"]
+
+    reviewed = client.post(
+        f"/documents/{doc_id}/heats/{heat_id}/review",
+        json={
+            "heat_id": "H-1",
+            "mass_kg": 152.0,
+            "sublots": [
+                {"id": existing_id, "origin_country": "United States", "origin_confidence": "high", "blend_pct": 60.0},
+                {"origin_country": "United States", "origin_confidence": "high", "blend_pct": 40.0, "notes": "split off during review"},
+            ],
+        },
+    ).json()
+
+    assert len(reviewed["sublots"]) == 2
+    ids = {s["id"] for s in reviewed["sublots"]}
+    assert existing_id in ids
+    assert len(ids) == 2  # the new row got its own distinct id, not a collision
+
+
+def test_review_omitting_existing_sublot_removes_it(client, conn, monkeypatch):
+    """Full-replace semantics are preserved: a sub-lot the reviewer
+    doesn't resubmit is removed — same as the pre-fix behavior for a
+    caller that never round-trips an id at all."""
+    _login_org_user(client, conn)
+    upload = _upload_mocked(client, monkeypatch, [_two_missing_origin_sublots_heat()]).json()
+    doc_id = upload["id"]
+    heat_id = upload["heats"][0]["id"]
+    sublots = upload["heats"][0]["sublots"]
+    assert len(sublots) == 2
+    keep_id = sublots[0]["id"]
+    dropped_id = sublots[1]["id"]
+
+    reviewed = client.post(
+        f"/documents/{doc_id}/heats/{heat_id}/review",
+        json={
+            "heat_id": "H-MULTI",
+            "mass_kg": 95.0,
+            "sublots": [
+                {"id": keep_id, "origin_country": "United States", "origin_confidence": "high", "blend_pct": 100.0},
+            ],
+        },
+    ).json()
+
+    assert len(reviewed["sublots"]) == 1
+    assert reviewed["sublots"][0]["id"] == keep_id
+    assert conn.execute("SELECT id FROM heat_sublots WHERE id = ?", (dropped_id,)).fetchone() is None
