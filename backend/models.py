@@ -69,6 +69,15 @@ class DocumentDetail(BaseModel):
 
 
 class SublotInput(BaseModel):
+    # `id` is the heat_sublots row id (SublotOut.id) — optional and
+    # separate from `sublot_id` (a human-readable business label like
+    # "Sub-lot A1"). When a caller round-trips an id it already has (from
+    # a prior GET), review_heat updates that row in place instead of
+    # dropping and recreating it, so a sub-lot's row id stays stable
+    # across a /review submission. Omit it (or leave it unmatched) for a
+    # genuinely new sub-lot — existing callers that don't know about this
+    # field are unaffected, they just don't get the stability.
+    id: Optional[str] = None
     sublot_id: Optional[str] = None
     blend_pct: Optional[float] = None
     origin_country: Optional[str] = None

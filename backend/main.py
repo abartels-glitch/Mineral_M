@@ -547,8 +547,29 @@ def review_heat(
         raise HTTPException(409, "heat already reviewed; a new review cycle is required to change it")
 
     sublot_dicts = [s.model_dump() for s in body.sublots]
-    sublot_ids = [uuid.uuid4().hex for _ in sublot_dicts]
-    sublot_flag_lists = [_evaluate_sublot_flag(s, sublot_id=sid) for s, sid in zip(sublot_dicts, sublot_ids)]
+    # Upsert by id, not a blind drop-and-reinsert: a submitted sublot whose
+    # `id` matches an existing row for this heat gets updated in place (its
+    # row id stays stable across this /review call — a client that already
+    # holds that id, e.g. from a prior GET, doesn't need to refetch before
+    # a later /correct call references it). No id, or an id that doesn't
+    # match, is a new sub-lot and gets a fresh one. Any existing row not
+    # referenced by this submission is removed below, preserving full-
+    # replace semantics for a reviewer who drops a sub-lot.
+    existing_sublot_ids = {row["id"] for row in conn.execute("SELECT id FROM heat_sublots WHERE heat_id = ?", (heat_id,))}
+    sublot_row_ids: list[str] = []
+    sublot_is_update: list[bool] = []
+    claimed_ids: set[str] = set()
+    for sublot in sublot_dicts:
+        candidate = sublot.get("id")
+        if candidate and candidate in existing_sublot_ids and candidate not in claimed_ids:
+            sublot_row_ids.append(candidate)
+            sublot_is_update.append(True)
+        else:
+            sublot_row_ids.append(uuid.uuid4().hex)
+            sublot_is_update.append(False)
+        claimed_ids.add(sublot_row_ids[-1])
+
+    sublot_flag_lists = [_evaluate_sublot_flag(s, sublot_id=sid) for s, sid in zip(sublot_dicts, sublot_row_ids)]
     heat_flags = [f for flist in sublot_flag_lists for f in flist]
     still_flagged = bool(heat_flags)
 
@@ -578,19 +599,37 @@ def review_heat(
             heat_id,
         ),
     )
-    conn.execute("DELETE FROM heat_sublots WHERE heat_id = ?", (heat_id,))
-    for sid, sublot, sublot_flags in zip(sublot_ids, sublot_dicts, sublot_flag_lists, strict=True):
-        conn.execute(
-            """
-            INSERT INTO heat_sublots (id, heat_id, sublot_id, blend_pct, origin_country, origin_confidence, notes, flagged, flags_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                sid, heat_id, sublot["sublot_id"], sublot["blend_pct"],
-                sublot["origin_country"], sublot["origin_confidence"], sublot["notes"],
-                1 if sublot_flags else 0, json.dumps(sublot_flags),
-            ),
-        )
+    stale_sublot_ids = existing_sublot_ids - claimed_ids
+    for stale_id in stale_sublot_ids:
+        conn.execute("DELETE FROM heat_sublots WHERE id = ?", (stale_id,))
+    for sid, sublot, sublot_flags, is_update in zip(
+        sublot_row_ids, sublot_dicts, sublot_flag_lists, sublot_is_update, strict=True
+    ):
+        if is_update:
+            conn.execute(
+                """
+                UPDATE heat_sublots
+                SET sublot_id = ?, blend_pct = ?, origin_country = ?, origin_confidence = ?, notes = ?,
+                    flagged = ?, flags_json = ?
+                WHERE id = ?
+                """,
+                (
+                    sublot["sublot_id"], sublot["blend_pct"], sublot["origin_country"], sublot["origin_confidence"],
+                    sublot["notes"], 1 if sublot_flags else 0, json.dumps(sublot_flags), sid,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO heat_sublots (id, heat_id, sublot_id, blend_pct, origin_country, origin_confidence, notes, flagged, flags_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sid, heat_id, sublot["sublot_id"], sublot["blend_pct"],
+                    sublot["origin_country"], sublot["origin_confidence"], sublot["notes"],
+                    1 if sublot_flags else 0, json.dumps(sublot_flags),
+                ),
+            )
     conn.commit()
     audit.record(conn, "document_heat", heat_id, "reviewed", actor=current_user["email"])
 
