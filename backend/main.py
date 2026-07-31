@@ -17,6 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -868,9 +869,19 @@ def issue_credential(
     )
     if body.heat_id is not None:
         conn.execute("UPDATE document_heats SET credential_id = ? WHERE id = ?", (credential_id, body.heat_id))
+    # A real Construct #1 UII needs the issuer's registered iac+enterprise_id
+    # (see db.py's issuers migration) — until that's set for a given issuer,
+    # falling back to the bare credential_id as uii_code is deliberate, not
+    # an oversight: it's exactly the legacy shape uii.parse_uii already
+    # resolves via its bare-credential_id fallback stage, so nothing here
+    # breaks for an issuer that hasn't registered a UII prefix yet.
+    if issuer["iac"] and issuer["enterprise_id"]:
+        uii_code = uii.generate_uii(issuer["iac"], issuer["enterprise_id"], credential_id)
+    else:
+        uii_code = credential_id
     conn.execute(
         "INSERT INTO uii_bindings (id, credential_id, uii_code, created_at) VALUES (?, ?, ?, ?)",
-        (uuid.uuid4().hex, credential_id, credential_id, issued_at),
+        (uuid.uuid4().hex, credential_id, uii_code, issued_at),
     )
     if supersedes_credential_id is not None:
         conn.execute("UPDATE credentials SET superseded_by = ? WHERE id = ?", (credential_id, supersedes_credential_id))
@@ -904,8 +915,28 @@ def issue_credential(
     )
 
 
-def _passport_url(request: Request, credential_id: str) -> str:
-    return f"{str(request.base_url).rstrip('/')}/passport.html?id={credential_id}"
+def _scan_payload_for_binding(binding) -> str:
+    # uii_bindings.uii_code holds the bare canonical UII value (or, for an
+    # issuer with no registered iac/enterprise_id yet, the bare
+    # credential_id — see the fallback in issue_credential). Only the
+    # former should be wrapped in the ISO/IEC 15434 envelope for scanning;
+    # a legacy binding is never a real IAC+EID+serial triple, so it stays
+    # unwrapped, unchanged from today's behavior. A real generated UII can
+    # never equal the raw credential_id (it's always at least iac+eid
+    # longer and uppercased), so this equality check is a sound way to
+    # tell the two apart without a new column.
+    if binding["uii_code"] == binding["credential_id"]:
+        return binding["uii_code"]
+    return uii.wrap_scan_payload(binding["uii_code"])
+
+
+def _passport_url(request: Request, scan_payload: str) -> str:
+    # scan_payload is the full scanned/printed form — a real Construct #1
+    # UII's ISO/IEC 15434 envelope (containing control chars and
+    # punctuation like `[`, `)`, `>`) or a legacy bare credential_id.
+    # quote() is required now that this can be the former: an un-encoded
+    # 25S envelope isn't valid inside a URL query string.
+    return f"{str(request.base_url).rstrip('/')}/passport.html?id={quote(scan_payload, safe='')}"
 
 
 @app.get("/credentials/{credential_id}/uii")
@@ -917,7 +948,7 @@ def get_uii_binding(credential_id: str, request: Request, conn=Depends(get_db)):
         "uii_code": binding["uii_code"],
         "credential_id": binding["credential_id"],
         "created_at": binding["created_at"],
-        "passport_url": _passport_url(request, credential_id),
+        "passport_url": _passport_url(request, _scan_payload_for_binding(binding)),
         "image_url": f"/credentials/{credential_id}/uii/image",
     }
 
@@ -927,7 +958,7 @@ def get_uii_image(credential_id: str, request: Request, conn=Depends(get_db)):
     binding = conn.execute("SELECT * FROM uii_bindings WHERE credential_id = ?", (credential_id,)).fetchone()
     if binding is None:
         raise HTTPException(404, "no UII binding for this credential")
-    png_bytes = uii.generate_datamatrix_png(_passport_url(request, credential_id))
+    png_bytes = uii.generate_datamatrix_png(_passport_url(request, _scan_payload_for_binding(binding)))
     return Response(content=png_bytes, media_type="image/png")
 
 
@@ -1007,23 +1038,60 @@ def get_audit_trail(credential_id: str, current_user: dict = Depends(auth.get_cu
 # --- passport (public) ------------------------------------------------------
 
 
-@app.get("/passport/{credential_id}", response_model=PassportResult)
-def get_passport(credential_id: str, conn=Depends(get_db)):
-    row = conn.execute("SELECT id FROM credentials WHERE id = ?", (credential_id,)).fetchone()
-    if row is None:
+def _known_issuer_prefixes(conn) -> dict[str, tuple[str, str]]:
+    return {
+        f"{row['iac']}{row['enterprise_id']}": (row["iac"], row["enterprise_id"])
+        for row in conn.execute(
+            "SELECT iac, enterprise_id FROM issuers WHERE iac IS NOT NULL AND enterprise_id IS NOT NULL"
+        )
+    }
+
+
+def _resolve_credential_for_lookup(conn, lookup_key: str) -> tuple[str, bool]:
+    """Runs uii.parse_uii on whatever a passport lookup was given —
+    a real Construct #1 UII, a legacy bare credential_id (today's shape,
+    and still what an issuer with no registered iac/enterprise_id
+    produces), or garbage — and returns (credential_id, is_legacy) on a
+    match. Raises the two distinct failure modes as distinct HTTP codes:
+    malformed/unsupported-construct (not even a valid UII) is a 400, a
+    well-formed UII or legacy id with no match is a 404 — collapsing
+    those back into one status would hide "rescan, bad photo" from
+    "this genuinely isn't registered"."""
+    def resolve_uii(code: str) -> Optional[str]:
+        row = conn.execute("SELECT credential_id FROM uii_bindings WHERE uii_code = ?", (code,)).fetchone()
+        return row["credential_id"] if row else None
+
+    def resolve_legacy_credential_id(text: str) -> Optional[str]:
+        row = conn.execute("SELECT id FROM credentials WHERE id = ?", (text,)).fetchone()
+        return row["id"] if row else None
+
+    result = uii.parse_uii(lookup_key, _known_issuer_prefixes(conn), resolve_uii, resolve_legacy_credential_id)
+    if result.outcome in ("malformed", "unsupported_construct"):
+        raise HTTPException(400, f"malformed UII: {result.reason}")
+    if result.outcome == "not_found":
         raise HTTPException(404, "credential not found")
+    return result.credential_id, result.is_legacy
+
+
+@app.get("/passport/{lookup_key}", response_model=PassportResult)
+def get_passport(lookup_key: str, conn=Depends(get_db)):
+    credential_id, is_legacy = _resolve_credential_for_lookup(conn, lookup_key)
     result = passport_engine.compile_passport(conn, credential_id)
-    audit.record(conn, "credential", credential_id, "passport_viewed", actor="unauthenticated")
+    audit.record(
+        conn, "credential", credential_id, "passport_viewed", actor="unauthenticated",
+        detail={"is_legacy": True} if is_legacy else {},
+    )
     return PassportResult(**result)
 
 
-@app.get("/passport/{credential_id}/pdf")
-def get_passport_pdf(credential_id: str, conn=Depends(get_db)):
-    row = conn.execute("SELECT id FROM credentials WHERE id = ?", (credential_id,)).fetchone()
-    if row is None:
-        raise HTTPException(404, "credential not found")
+@app.get("/passport/{lookup_key}/pdf")
+def get_passport_pdf(lookup_key: str, conn=Depends(get_db)):
+    credential_id, is_legacy = _resolve_credential_for_lookup(conn, lookup_key)
     result = passport_engine.compile_passport(conn, credential_id)
-    audit.record(conn, "credential", credential_id, "passport_pdf_exported", actor="unauthenticated")
+    audit.record(
+        conn, "credential", credential_id, "passport_pdf_exported", actor="unauthenticated",
+        detail={"is_legacy": True} if is_legacy else {},
+    )
     pdf_bytes = pdf_export.render_passport_pdf(result)
     return Response(
         content=pdf_bytes,
