@@ -54,6 +54,7 @@
       review beyond the public passport gets: who did what, when, and
       whether any extracted field was corrected by a human reviewer.
     </p>
+    <div id="chain-note"></div>
     <h3>Timeline</h3>
     <table>
       <thead>
@@ -140,7 +141,38 @@
     }
   }
 
+  // Both directions of the supersession chain — revoked_at/superseded_by
+  // live on this credential; supersedes is a reverse lookup (main.py's
+  // get_audit_trail) for "what did I replace," since superseded_by only
+  // ever points forward from the old row to the new one.
+  function renderChainNote(trail) {
+    const container = document.getElementById("chain-note");
+    container.innerHTML = "";
+    const parts = [];
+    if (trail.revoked_at) {
+      parts.push(
+        el("p", { style: "margin: 0 0 0.4rem 0" }, [
+          document.createTextNode(`Revoked at ${trail.revoked_at}. `),
+          trail.superseded_by
+            ? el("a", { href: `/passport.html?id=${trail.superseded_by}`, text: "View superseding credential →" })
+            : document.createTextNode("No superseding credential has been issued yet."),
+        ])
+      );
+    }
+    if (trail.supersedes) {
+      parts.push(
+        el("p", { style: "margin: 0" }, [
+          document.createTextNode("Reissued to replace "),
+          el("a", { href: `/passport.html?id=${trail.supersedes.id}`, text: trail.supersedes.id.slice(0, 12) + "…" }),
+          document.createTextNode(`, revoked at ${trail.supersedes.revoked_at}.`),
+        ])
+      );
+    }
+    if (parts.length) container.appendChild(el("div", { class: "chain-note" }, parts));
+  }
+
   function renderAuditTrail(trail) {
+    renderChainNote(trail);
     const rows = document.getElementById("audit-rows");
     rows.innerHTML = "";
     const entries = [...trail.audit_log, ...trail.document_audit_log, ...(trail.heat_audit_log || [])].sort((a, b) =>
@@ -206,7 +238,7 @@
   }
 
   function verdictLabel(v) {
-    return { pass: "PASS", fail: "FAIL", insufficient_data: "INSUFFICIENT DATA" }[v] || v;
+    return { pass: "PASS", fail: "FAIL", insufficient_data: "INSUFFICIENT DATA", revoked: "REVOKED" }[v] || v;
   }
 
   function renderResult(result) {

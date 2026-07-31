@@ -473,12 +473,32 @@
         })
       );
     } else if (heat.credential_id) {
-      card.appendChild(
-        el("p", { class: "success" }, [
-          document.createTextNode(`Credential issued: ${heat.credential_id}. `),
-          el("a", { href: `/passport.html?id=${heat.credential_id}`, text: "View passport →" }),
-        ])
-      );
+      // document_heats.credential_id points at whichever credential is
+      // currently active for this heat — a correction that auto-revoked
+      // it (main.py's _revoke_stale_credential) doesn't clear this
+      // pointer, it just leaves it pointing at a now-revoked credential
+      // until a reissue repoints it. `credentials` (from GET /credentials,
+      // which already includes revoked_at) is how the UI tells the two
+      // cases apart.
+      const linkedCredential = credentials.find((c) => c.id === heat.credential_id);
+      if (linkedCredential && linkedCredential.revoked_at) {
+        card.appendChild(
+          el("p", { class: "error" }, [
+            document.createTextNode(
+              `Credential ${heat.credential_id} was revoked at ${linkedCredential.revoked_at} — its source data was corrected after issuance. `
+            ),
+            el("a", { href: `/passport.html?id=${heat.credential_id}`, text: "View revoked passport →" }),
+          ])
+        );
+        card.appendChild(renderIssuePanel(doc, heat));
+      } else {
+        card.appendChild(
+          el("p", { class: "success" }, [
+            document.createTextNode(`Credential issued: ${heat.credential_id}. `),
+            el("a", { href: `/passport.html?id=${heat.credential_id}`, text: "View passport →" }),
+          ])
+        );
+      }
     } else {
       card.appendChild(el("p", { class: "success", text: `Reviewed by ${heat.reviewed_by} at ${heat.reviewed_at}. Locked from further edits.` }));
       card.appendChild(renderIssuePanel(doc, heat));
@@ -513,11 +533,23 @@
     const heatNumber = el("input", { type: "text", value: heat.heat_id || "" });
     const supplierName = el("input", { type: "text", value: doc.supplier_id || "" });
 
+    // Revoked credentials stay in this list (picking sources is itself
+    // an audit-relevant decision, so hiding them would hide history) but
+    // can't be selected — a revoked credential no longer represents
+    // valid provenance for a new composite credential to build on.
     const sourceCheckboxes = credentials.map((c) =>
-      el("label", { style: "display:flex;align-items:center;gap:0.4rem;font-weight:normal;color:inherit" }, [
-        el("input", { type: "checkbox", value: c.id, class: "source-checkbox" }),
-        document.createTextNode(`${c.credential_type} — ${c.id.slice(0, 10)}…`),
-      ])
+      el(
+        "label",
+        {
+          style: `display:flex;align-items:center;gap:0.4rem;font-weight:normal;${c.revoked_at ? "color:var(--muted)" : "color:inherit"}`,
+        },
+        [
+          el("input", { type: "checkbox", value: c.id, class: "source-checkbox", disabled: c.revoked_at ? "disabled" : null }),
+          document.createTextNode(
+            `${c.credential_type} — ${c.id.slice(0, 10)}…${c.revoked_at ? " (revoked, cannot be used as a source)" : ""}`
+          ),
+        ]
+      )
     );
 
     const segregationBlock = el("div", { style: heat.segregation_attested ? "display:block" : "display:none" }, [
@@ -588,6 +620,8 @@
           );
           credentials = await apiFetch("/credentials");
           await refreshAll();
+          const updatedDoc = await apiFetch(`/documents/${doc.id}`);
+          await renderDocumentPanel(updatedDoc);
         } catch (err) {
           resultEl.innerHTML = "";
           resultEl.appendChild(el("span", { class: "error", text: err.message }));

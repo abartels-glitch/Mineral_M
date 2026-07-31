@@ -11,6 +11,13 @@
   --fail-bg: #fdeceb;
   --insufficient: #9a6700;
   --insufficient-bg: #fff6e0;
+  /* Revoked is deliberately not a shade of fail's red — a fail means a
+     check ran and found a real problem; revoked means the credential
+     was retracted (its source changed after signing), which is an
+     administrative/provenance fact, not a compliance finding. Slate
+     reads as "this is no longer live," distinct from "this is bad." */
+  --revoked: #4b4f5a;
+  --revoked-bg: #e7e8ec;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -23,6 +30,8 @@
     --pass-bg: #123322;
     --fail-bg: #3a1a18;
     --insufficient-bg: #3a2c05;
+    --revoked: #c2c4cc;
+    --revoked-bg: #2c2d33;
   }
 }
 
@@ -154,11 +163,23 @@ pre {
 .verdict.pass { background: var(--pass-bg); color: var(--pass); }
 .verdict.fail { background: var(--fail-bg); color: var(--fail); }
 .verdict.insufficient_data { background: var(--insufficient-bg); color: var(--insufficient); }
+.verdict.revoked { background: var(--revoked-bg); color: var(--revoked); }
 
 .node-status { font-weight: 700; }
 .node-status.pass { color: var(--pass); }
 .node-status.fail { color: var(--fail); }
 .node-status.insufficient_data { color: var(--insufficient); }
+.node-status.revoked { color: var(--revoked); }
+
+.chain-note {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--revoked);
+  border-radius: 6px;
+  padding: 0.6rem 0.75rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+}
+.chain-note a { color: inherit; }
 
 .muted { color: var(--muted); font-size: 0.85rem; }
 .error { color: var(--fail); font-size: 0.85rem; margin-bottom: 0.5rem; }
