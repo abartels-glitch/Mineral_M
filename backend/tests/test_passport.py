@@ -175,7 +175,11 @@ def test_revoked_credential_fails(conn):
 
     result = passport_engine.compile_passport(conn, cred_id)
 
-    assert result["verdict"] == "fail"
+    # Distinct from "fail" — revocation is an explicit retraction, not a
+    # compliance check finding a problem with otherwise-live data. See
+    # models.NodeStatus.
+    assert result["verdict"] == "revoked"
+    assert result["nodes"][0]["node_status"] == "revoked"
     assert any("revoked" in r for r in result["nodes"][0]["reasons"])
 
 

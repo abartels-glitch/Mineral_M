@@ -204,6 +204,29 @@ def _append_fresh_flags(flags: list[dict], fresh_flags: list[dict], match_sublot
             flags.append(dict(fresh))
 
 
+def _revoke_stale_credential(conn, heat_credential_id: Optional[str], actor: str, revoked_at: str, reason: str) -> None:
+    """Any correction to a heat (or one of its sub-lots) that already
+    has an issued credential revokes that credential — deliberately not
+    scoped to "only fields that plausibly matter": the credential's
+    subject is a free-typed dict at issuance, not schema-validated
+    against heat/sub-lot fields, so there's no reliable way to map a
+    correction's field_name onto "did this actually change the signed
+    subject." A false-positive revoke costs a reviewer a quick reissue;
+    a false-negative leaves a stale PASS live. Idempotent — a credential
+    already revoked (by an earlier correction to the same heat) is left
+    alone rather than re-stamped or re-audited."""
+    if heat_credential_id is None:
+        return
+    credential = conn.execute("SELECT revoked_at FROM credentials WHERE id = ?", (heat_credential_id,)).fetchone()
+    if credential is None or credential["revoked_at"]:
+        return
+    conn.execute("UPDATE credentials SET revoked_at = ? WHERE id = ?", (revoked_at, heat_credential_id))
+    audit.record(
+        conn, "credential", heat_credential_id, "revoked", actor=actor,
+        detail={"reason": reason},
+    )
+
+
 def _row_to_sublot(row) -> SublotOut:
     return SublotOut(
         id=row["id"],
@@ -687,6 +710,10 @@ def correct_field(
             "corrected_value": corrected_value,
         },
     )
+    _revoke_stale_credential(
+        conn, heat["credential_id"], actor, corrected_at,
+        reason=f"source heat data corrected: {body.target} field '{body.field_name}'",
+    )
     conn.commit()
 
     updated = conn.execute("SELECT * FROM document_heats WHERE id = ?", (heat_id,)).fetchone()
@@ -765,6 +792,7 @@ def issue_credential(
 
     document_id = None
     document_content_hash = None
+    supersedes_credential_id = None
     if body.heat_id is not None:
         heat = conn.execute("SELECT * FROM document_heats WHERE id = ?", (body.heat_id,)).fetchone()
         if heat is None:
@@ -775,7 +803,19 @@ def issue_credential(
         if not heat["reviewed"]:
             raise HTTPException(400, "heat must be reviewed before a credential can be issued from it")
         if heat["credential_id"]:
-            raise HTTPException(409, "a credential has already been issued from this heat")
+            # A credential already exists for this heat — only an
+            # explicit reissue (the existing one revoked, e.g. by a
+            # correction landing on this heat after it was signed) is
+            # allowed to proceed. This is the deliberate "explicit
+            # reissue" step: nothing here reuses the old subject or
+            # auto-fills anything — the reviewer fills out this same
+            # form again with the corrected data.
+            existing = conn.execute(
+                "SELECT id, revoked_at FROM credentials WHERE id = ?", (heat["credential_id"],)
+            ).fetchone()
+            if existing and not existing["revoked_at"]:
+                raise HTTPException(409, "a credential has already been issued from this heat")
+            supersedes_credential_id = heat["credential_id"]
         document_id = doc["id"]
         document_content_hash = doc["content_hash"]
 
@@ -806,8 +846,8 @@ def issue_credential(
         INSERT INTO credentials (
             id, issuer_id, credential_type, subject_json, sources_json,
             segregation_attested, segregation_attested_by, segregation_note,
-            document_id, document_content_hash, payload_hash, signature, superseded_by, revoked_at, issued_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+            document_id, document_content_hash, heat_id, payload_hash, signature, superseded_by, revoked_at, issued_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
         """,
         (
             credential_id,
@@ -820,6 +860,7 @@ def issue_credential(
             body.segregation_note,
             document_id,
             document_content_hash,
+            body.heat_id,
             payload_hash,
             signature,
             issued_at,
@@ -831,8 +872,17 @@ def issue_credential(
         "INSERT INTO uii_bindings (id, credential_id, uii_code, created_at) VALUES (?, ?, ?, ?)",
         (uuid.uuid4().hex, credential_id, credential_id, issued_at),
     )
+    if supersedes_credential_id is not None:
+        conn.execute("UPDATE credentials SET superseded_by = ? WHERE id = ?", (credential_id, supersedes_credential_id))
+        audit.record(
+            conn, "credential", supersedes_credential_id, "superseded",
+            actor=current_user["email"], detail={"superseded_by": credential_id},
+        )
     conn.commit()
-    audit.record(conn, "credential", credential_id, "issued", actor=current_user["email"], detail={"credential_type": body.credential_type})
+    audit.record(
+        conn, "credential", credential_id, "issued", actor=current_user["email"],
+        detail={"credential_type": body.credential_type, "supersedes": supersedes_credential_id},
+    )
 
     return CredentialResponse(
         id=credential_id,
@@ -845,6 +895,7 @@ def issue_credential(
         segregation_note=body.segregation_note,
         document_id=document_id,
         document_content_hash=document_content_hash,
+        heat_id=body.heat_id,
         payload_hash=payload_hash,
         signature=signature,
         superseded_by=None,
@@ -906,7 +957,13 @@ def get_audit_trail(credential_id: str, current_user: dict = Depends(auth.get_cu
             "SELECT action, actor, detail_json, created_at FROM audit_log WHERE entity_type = 'document' AND entity_id = ? ORDER BY created_at",
             (credential["document_id"],),
         ).fetchall()
-        heat_row = conn.execute("SELECT * FROM document_heats WHERE credential_id = ?", (credential_id,)).fetchone()
+        # Looked up by credentials.heat_id (permanent, set once at
+        # issuance) rather than document_heats.credential_id (which
+        # always points at whichever credential is *currently* active
+        # for that heat) — a revoked/superseded credential would
+        # otherwise lose track of its originating heat the moment a
+        # successor is issued.
+        heat_row = conn.execute("SELECT * FROM document_heats WHERE id = ?", (credential["heat_id"],)).fetchone()
         if heat_row is not None:
             heat_out = _row_to_heat(conn, heat_row).model_dump()
             # Reviewed/field_corrected events — same entity_type='document_heat'
@@ -918,8 +975,19 @@ def get_audit_trail(credential_id: str, current_user: dict = Depends(auth.get_cu
                 (heat_row["id"],),
             ).fetchall()
 
+    # The chain in both directions: what this credential replaced (if
+    # it's a reissue) and what replaced it (if it's since been revoked
+    # and reissued again) — superseded_by lives on the old row and
+    # points forward, so "what did I replace" is a reverse lookup.
+    predecessor = conn.execute(
+        "SELECT id, revoked_at, issued_at FROM credentials WHERE superseded_by = ?", (credential_id,)
+    ).fetchone()
+
     return {
         "credential_id": credential_id,
+        "revoked_at": credential["revoked_at"],
+        "superseded_by": credential["superseded_by"],
+        "supersedes": dict(predecessor) if predecessor else None,
         "audit_log": [
             {"action": r["action"], "actor": r["actor"], "detail": json.loads(r["detail_json"] or "{}"), "created_at": r["created_at"]}
             for r in audit_rows

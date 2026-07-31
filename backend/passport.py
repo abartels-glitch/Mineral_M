@@ -71,7 +71,11 @@ def _evaluate_node(conn: sqlite3.Connection, credential_id: str) -> tuple[dict, 
 
     def downgrade(new_status: str) -> None:
         nonlocal node_status
-        rank = {"pass": 0, "insufficient_data": 1, "fail": 2}
+        # revoked outranks fail: an explicit retraction is the most
+        # authoritative reason not to trust a credential, worth
+        # headlining even alongside an independently-failing check
+        # (e.g. a stale signature) — both reasons still show either way.
+        rank = {"pass": 0, "insufficient_data": 1, "fail": 2, "revoked": 3}
         if rank[new_status] > rank[node_status]:
             node_status = new_status
 
@@ -120,7 +124,7 @@ def _evaluate_node(conn: sqlite3.Connection, credential_id: str) -> tuple[dict, 
             )
         else:
             reasons.append(f"revoked at {row['revoked_at']} with no superseding credential")
-        downgrade("fail")
+        downgrade("revoked")
 
     norm_origin = (origin_country or "").strip().lower()
     if not origin_country:
@@ -181,7 +185,9 @@ def compile_passport(conn: sqlite3.Connection, root_credential_id: str) -> dict:
 
     visit(root_credential_id)
 
-    if any(n["node_status"] == "fail" for n in nodes):
+    if any(n["node_status"] == "revoked" for n in nodes):
+        verdict = "revoked"
+    elif any(n["node_status"] == "fail" for n in nodes):
         verdict = "fail"
     elif any(n["node_status"] == "insufficient_data" for n in nodes):
         verdict = "insufficient_data"
