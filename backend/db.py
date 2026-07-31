@@ -92,6 +92,13 @@ CREATE TABLE IF NOT EXISTS heat_sublots (
     flags_json TEXT NOT NULL DEFAULT '[]'
 );
 
+-- `heat_id` is set once at issuance and never reassigned — it's the
+-- permanent record of which heat this credential was signed from,
+-- independent of document_heats.credential_id (which always points to
+-- whichever credential is *currently active* for that heat, and moves
+-- on to a reissued credential once this one is revoked/superseded).
+-- Without this, a revoked credential's own audit trail would lose
+-- track of its originating heat the moment it's superseded.
 CREATE TABLE IF NOT EXISTS credentials (
     id TEXT PRIMARY KEY,
     issuer_id TEXT NOT NULL REFERENCES issuers(id),
@@ -103,6 +110,7 @@ CREATE TABLE IF NOT EXISTS credentials (
     segregation_note TEXT,
     document_id TEXT REFERENCES documents(id),
     document_content_hash TEXT,
+    heat_id TEXT REFERENCES document_heats(id),
     payload_hash TEXT NOT NULL,
     signature TEXT NOT NULL,
     superseded_by TEXT REFERENCES credentials(id),
@@ -196,11 +204,23 @@ def _migrate_flags_json(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} DROP COLUMN flagged_reason")
 
 
+def _migrate_credentials_heat_id(conn: sqlite3.Connection) -> None:
+    """CREATE TABLE IF NOT EXISTS doesn't touch a table that already
+    exists on disk. Existing rows get heat_id=NULL — they predate the
+    revoke/reissue feature, so there's nothing to backfill it from
+    (document_heats.credential_id only ever points forward to whichever
+    credential is currently active, never a history of past ones)."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(credentials)")}
+    if "heat_id" not in cols:
+        conn.execute("ALTER TABLE credentials ADD COLUMN heat_id TEXT REFERENCES document_heats(id)")
+
+
 def init_db() -> None:
     conn = get_connection()
     try:
         conn.executescript(SCHEMA)
         _migrate_flags_json(conn)
+        _migrate_credentials_heat_id(conn)
         conn.commit()
     finally:
         conn.close()

@@ -127,6 +127,7 @@ class CredentialResponse(BaseModel):
     segregation_note: Optional[str]
     document_id: Optional[str]
     document_content_hash: Optional[str]
+    heat_id: Optional[str]
     payload_hash: str
     signature: str
     superseded_by: Optional[str]
@@ -134,18 +135,26 @@ class CredentialResponse(BaseModel):
     issued_at: str
 
 
+# "revoked" is a distinct outcome from "fail" — a fail means a check ran
+# and found a real problem (banned origin, bad signature); revoked means
+# the credential itself was retracted (its source data changed after
+# signing) and, if reissued, a successor exists. Collapsing that into a
+# generic fail would read identically to an actual compliance violation.
+NodeStatus = Literal["pass", "fail", "insufficient_data", "revoked"]
+
+
 class PassportNodeResult(BaseModel):
     credential_id: str
     credential_type: str
     material_type: Optional[str]
     origin_country: Optional[str]
-    node_status: Literal["pass", "fail", "insufficient_data"]
+    node_status: NodeStatus
     reasons: list[str]
 
 
 class PassportResult(BaseModel):
     credential_id: str
-    verdict: Literal["pass", "fail", "insufficient_data"]
+    verdict: NodeStatus
     reasons: list[str]
     nodes: list[PassportNodeResult]
 
