@@ -327,6 +327,12 @@
       }
       const rowClass = worstSeverity === "blocking" ? "blocking-row" : worstSeverity ? "flagged-row" : "";
       const row = el("tr", { class: rowClass }, cells);
+      // Carries the existing heat_sublots row id (if any) through to
+      // getValue() below, so a /review submission can round-trip it and
+      // the backend updates this row in place instead of dropping and
+      // recreating it with a new id. A freshly-added row (the "+ sub-lot"
+      // button) has none, which correctly signals "this is new."
+      row.dataset.rowId = sublot.id || "";
       rows.push(row);
       tbody.appendChild(row);
     }
@@ -357,6 +363,7 @@
           const select = row.querySelector("select");
           const blend = parseFloat(inputs[1].value);
           return {
+            id: row.dataset.rowId || null,
             sublot_id: inputs[0].value || null,
             blend_pct: Number.isNaN(blend) ? null : blend,
             origin_country: inputs[2].value || null,
