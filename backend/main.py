@@ -1084,15 +1084,90 @@ def get_passport(lookup_key: str, conn=Depends(get_db)):
     return PassportResult(**result)
 
 
+def _revocation_reason(conn, credential_id: str) -> Optional[str]:
+    """The revocation reason lives only in audit_log (main.py's
+    _revoke_stale_credential writes it there, never onto the credentials
+    row itself) — deliberately pulls just detail.reason and discards
+    `actor`, which is a reviewer identity and out of the compliance
+    record's scope (see get_passport_pdf's provenance-gathering note)."""
+    row = conn.execute(
+        """
+        SELECT detail_json FROM audit_log
+        WHERE entity_type = 'credential' AND entity_id = ? AND action = 'revoked'
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        (credential_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return json.loads(row["detail_json"] or "{}").get("reason")
+
+
 @app.get("/passport/{lookup_key}/pdf")
-def get_passport_pdf(lookup_key: str, conn=Depends(get_db)):
+def get_passport_pdf(lookup_key: str, request: Request, conn=Depends(get_db)):
     credential_id, is_legacy = _resolve_credential_for_lookup(conn, lookup_key)
     result = passport_engine.compile_passport(conn, credential_id)
     audit.record(
         conn, "credential", credential_id, "passport_pdf_exported", actor="unauthenticated",
         detail={"is_legacy": True} if is_legacy else {},
     )
-    pdf_bytes = pdf_export.render_passport_pdf(result)
+    # Everything below is fetched separately rather than added to
+    # compile_passport's return shape — that keeps compile_passport (and
+    # the JSON /passport API response built from it) completely
+    # untouched by this. No new schema either: issuer identity,
+    # issuance/revocation timestamps, and the supersession pointer are
+    # all already on existing rows — compile_passport's node dicts just
+    # never carried them.
+    node_ids = [n["credential_id"] for n in result["nodes"]]
+
+    cred_rows = (
+        conn.execute(
+            f"SELECT id, issuer_id, issued_at, revoked_at, superseded_by FROM credentials "
+            f"WHERE id IN ({','.join('?' * len(node_ids))})",
+            node_ids,
+        ).fetchall()
+        if node_ids
+        else []
+    )
+    credential_provenance = {row["id"]: dict(row) for row in cred_rows}
+
+    issuer_ids = {row["issuer_id"] for row in cred_rows}
+    issuer_rows = (
+        conn.execute(
+            f"SELECT id, name, iac, enterprise_id FROM issuers WHERE id IN ({','.join('?' * len(issuer_ids))})",
+            list(issuer_ids),
+        ).fetchall()
+        if issuer_ids
+        else []
+    )
+    issuers_by_id = {row["id"]: dict(row) for row in issuer_rows}
+
+    for node_id, cred in credential_provenance.items():
+        cred["issuer"] = issuers_by_id.get(cred["issuer_id"])
+        cred["revocation_reason"] = _revocation_reason(conn, node_id) if cred["revoked_at"] else None
+
+    # uii_bindings lookup extended to also cover any superseded_by ids —
+    # a successor credential isn't itself a node in this passport's
+    # source graph, but its UII is exactly what a reader needs to find
+    # "the current valid version" (see pdf_export's chain-of-custody
+    # section).
+    lookup_ids = set(node_ids) | {c["superseded_by"] for c in credential_provenance.values() if c["superseded_by"]}
+    uii_rows = (
+        conn.execute(
+            f"SELECT credential_id, uii_code FROM uii_bindings WHERE credential_id IN ({','.join('?' * len(lookup_ids))})",
+            list(lookup_ids),
+        ).fetchall()
+        if lookup_ids
+        else []
+    )
+    uii_codes = {row["credential_id"]: row["uii_code"] for row in uii_rows}
+    # Plain, unwrapped credential_id — this is the human-readable link
+    # a contracting officer would actually copy/click to look up full
+    # audit history, not the enveloped scan payload (which is unreadable
+    # control-character text, fine for a Data Matrix, useless in a
+    # printed footer).
+    passport_url = _passport_url(request, credential_id)
+    pdf_bytes = pdf_export.render_passport_pdf(result, uii_codes, credential_provenance, passport_url)
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
