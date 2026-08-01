@@ -563,6 +563,20 @@
             el("a", { href: `/passport.html?id=${heat.credential_id}`, text: "View passport →" }),
           ])
         );
+        // Persisted here (not just shown transiently at the moment of
+        // issuance in renderIssuePanel) since this branch is what
+        // renders on every subsequent load/re-render of an already-
+        // issued heat's card.
+        card.appendChild(
+          el("div", { style: "margin-top: 0.5rem" }, [
+            el("label", { text: "Data Matrix (scan to open this passport)" }),
+            el("img", {
+              src: `/credentials/${heat.credential_id}/uii/image`,
+              alt: `Data Matrix for credential ${heat.credential_id}`,
+              style: "width: 120px; height: 120px; image-rendering: pixelated; border: 1px solid var(--border); border-radius: 6px; background: #fff",
+            }),
+          ])
+        );
       }
     } else {
       card.appendChild(el("p", { class: "success", text: `Reviewed by ${heat.reviewed_by} at ${heat.reviewed_at}. Locked from further edits.` }));

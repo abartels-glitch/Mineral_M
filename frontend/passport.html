@@ -24,6 +24,17 @@
     <h2>Result</h2>
     <div id="verdict"></div>
     <p><a id="pdf-link" href="#" target="_blank">Download PDF report →</a></p>
+    <div id="datamatrix-block" style="margin: 0.75rem 0">
+      <label>Data Matrix (scan to open this passport)</label>
+      <div>
+        <img
+          id="datamatrix-img"
+          alt="Data Matrix for this credential"
+          style="width: 120px; height: 120px; image-rendering: pixelated; border: 1px solid var(--border); border-radius: 6px; background: #fff"
+        />
+      </div>
+      <p><a id="datamatrix-link" href="#" target="_blank">View/download Data Matrix →</a></p>
+    </div>
     <h3>Why</h3>
     <ul id="reasons"></ul>
     <h3>Credential graph</h3>
@@ -244,6 +255,9 @@
       el("div", { class: `verdict ${result.verdict}`, text: verdictLabel(result.verdict) })
     );
     document.getElementById("pdf-link").href = `/passport/${result.credential_id}/pdf`;
+    const datamatrixUrl = `/credentials/${result.credential_id}/uii/image`;
+    document.getElementById("datamatrix-img").src = datamatrixUrl;
+    document.getElementById("datamatrix-link").href = datamatrixUrl;
 
     const reasonsEl = document.getElementById("reasons");
     reasonsEl.innerHTML = "";
