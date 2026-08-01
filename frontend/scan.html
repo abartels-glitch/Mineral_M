@@ -3,21 +3,21 @@
 
 <header id="header-root"></header>
 
-<main>
+<main class="narrow">
+  <h1 class="page-title">Scan</h1>
+
   <section class="panel">
     <h2>Scan a part's Data Matrix code</h2>
     <p class="muted">
-      Take or choose a photo of the Data Matrix printed on a part
-      (generated at credential issuance — see <code>index.html</code>)
-      and it resolves straight to that credential's passport, no login
-      required. On a phone, this opens the camera directly; on desktop,
-      it opens a file picker. Decoding happens entirely in the browser
-      via <a href="https://github.com/zxing-js/library" target="_blank" rel="noopener">ZXing</a>,
-      vendored locally under <code>frontend/vendor/</code> rather than a
-      CDN — the photo is never uploaded to the server.
+      Take or choose a photo of the Data Matrix code printed on a part
+      and it resolves straight to that credential's compliance
+      passport — no login required. On a phone, this opens your camera
+      directly; on desktop, it opens a file picker. Decoding happens
+      entirely on your device — the photo is never uploaded or sent
+      anywhere.
     </p>
-    <label for="scan-file">Photo of the Data Matrix</label>
-    <input type="file" id="scan-file" accept="image/*" capture="environment" />
+    <input type="file" id="scan-file" accept="image/*" capture="environment" hidden />
+    <button type="button" id="scan-trigger">Take or choose a photo</button>
     <img id="preview" alt="" style="display: none; max-width: 320px; margin-top: 0.75rem; border-radius: 8px; border: 1px solid var(--border)" />
     <p class="error" id="scan-error"></p>
     <p class="success" id="scan-status"></p>
@@ -30,6 +30,13 @@
   const statusEl = document.getElementById("scan-status");
   const errorEl = document.getElementById("scan-error");
   const previewEl = document.getElementById("preview");
+  const fileInput = document.getElementById("scan-file");
+
+  // The file input is hidden (the `hidden` attribute) so the page has
+  // one consistently-styled button, same as every other page's primary
+  // action — clicking it just opens the same native camera/file picker
+  // a direct tap on the input would have.
+  document.getElementById("scan-trigger").addEventListener("click", () => fileInput.click());
 
   function resolveDecodedText(text) {
     if (/^https?:\/\//.test(text)) {
@@ -40,7 +47,7 @@
     }
   }
 
-  document.getElementById("scan-file").addEventListener("change", async (e) => {
+  fileInput.addEventListener("change", async (e) => {
     const file = e.target.files[0];
     errorEl.textContent = "";
     statusEl.textContent = "";

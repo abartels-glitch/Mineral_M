@@ -4,13 +4,15 @@
 <header id="header-root"></header>
 
 <main>
+  <h1 class="page-title">Passport lookup</h1>
+
   <section class="panel">
     <h2>Look up a credential</h2>
     <p class="muted">
-      Enter a credential id (e.g. a sintered-batch credential id from
-      <code>seed.py</code>'s output) to compile its passport: a recursive
-      walk of the credential graph checking signatures, revocation, FEOC-covered
-      origin countries, materials scope, and segregation attestations.
+      Enter a credential ID to compile its compliance passport — a full
+      check of signatures, revocation status, origin-country
+      restrictions, material scope, and chain-of-custody attestations
+      across the entire credential graph.
     </p>
     <label for="credential-id">Credential id</label>
     <input type="text" id="credential-id" placeholder="e.g. 9f2c1a..." />

@@ -4,15 +4,16 @@
 <header id="header-root"></header>
 
 <main>
+  <h1 class="page-title">Review queue</h1>
+
   <section class="panel">
     <h2>Upload a certificate of conformance / MTR</h2>
     <p class="muted">
-      MVP only supports one document type (per the pinned document-scope
-      decision). A certificate can cover one heat or several (a
-      consolidated multi-heat certificate) — each heat is reviewed and
-      issued as its own credential. PDFs are read via their embedded text
-      layer, not image OCR (see README). Plain text files also work, for
-      the demo samples.
+      Upload a mill test report or certificate of conformance. A single
+      certificate can cover one heat or several — each heat is reviewed
+      and issued as its own credential. PDFs are read directly from
+      their text content; scanned image-only PDFs aren't supported yet.
+      Plain text files also work.
     </p>
     <form id="upload-form">
       <label for="upload-file">Document file (.pdf or .txt)</label>
@@ -47,6 +48,23 @@
     renderDocList();
   }
 
+  // Synthetic documents created without a real uploaded file (e.g. demo
+  // seed data) get a filename that's just their own id plus an
+  // extension — detect that exact shape and show a friendly fallback
+  // instead of a raw id in the customer-facing document list. A genuine
+  // uploaded filename is untouched.
+  function displayFilename(doc) {
+    const stem = doc.filename.replace(/\.[^./]+$/, "");
+    if (stem === doc.id) {
+      const date = new Date(doc.uploaded_at);
+      const formatted = Number.isNaN(date.getTime())
+        ? doc.uploaded_at
+        : date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+      return `Document — ${formatted}`;
+    }
+    return doc.filename;
+  }
+
   function renderDocList() {
     const list = document.getElementById("doc-list");
     list.innerHTML = "";
@@ -58,7 +76,7 @@
         "li",
         { onclick: () => selectDocument(doc.id), class: doc.id === selectedDocumentId ? "selected" : "" },
         [
-          el("span", { text: doc.filename }),
+          el("span", { text: displayFilename(doc) }),
           el("span", { class: `badge status-${doc.status}`, text: doc.status }),
         ]
       );
@@ -393,20 +411,35 @@
         el("div", {}, headerTags),
       ])
     );
+    // Zone: Needs attention — open flags + the correction form to fix
+    // them, elevated into one warning callout rather than scattered
+    // small badges next to individual fields. Escalates to fail-red
+    // when a blocking flag is present, amber otherwise. Omitted
+    // entirely when there's nothing to show, so a clean heat's card
+    // doesn't carry an empty warning box.
     const heatFlagList = renderFlagList(heat.flags);
-    if (heatFlagList) card.appendChild(heatFlagList);
-
     const correctionPanel = renderCorrectionPanel(doc, heat, statusEl, async () => {
       const updatedDoc = await apiFetch(`/documents/${doc.id}`);
       await refreshAll();
       await renderDocumentPanel(updatedDoc);
     });
-    if (correctionPanel) card.appendChild(correctionPanel);
+    if (heatFlagList || correctionPanel) {
+      const attentionZone = el("div", { class: `zone zone-attention${hasBlockingFlag ? " blocking" : ""}` }, [
+        el("div", { class: "zone-title", text: "Needs attention" }),
+      ]);
+      if (heatFlagList) attentionZone.appendChild(heatFlagList);
+      if (correctionPanel) attentionZone.appendChild(correctionPanel);
+      card.appendChild(attentionZone);
+    }
+
+    // Zone: Found — the fields extraction actually recovered, kept
+    // quiet/neutral since these don't need the reviewer's attention.
+    const foundZone = el("div", { class: "zone zone-found" }, [el("div", { class: "zone-title", text: "Found" })]);
 
     const heatIdInput = el("input", { type: "text", value: heat.heat_id || "", disabled: locked ? "disabled" : null });
     const massInput = el("input", { type: "text", value: heat.mass_kg ?? "", disabled: locked ? "disabled" : null });
 
-    card.append(
+    foundZone.append(
       el("div", { class: "field-row" }, [
         el("div", { class: "field-row-head" }, [el("span", { class: "field-row-label", text: "Heat / melt id" }), heat.heat_id ? tag("found") : tag("missing")]),
         heatIdInput,
@@ -417,10 +450,10 @@
       ])
     );
 
-    card.appendChild(el("label", { text: "Alloy composition (wt%)" }));
+    foundZone.appendChild(el("label", { text: "Alloy composition (wt%)" }));
     const compositionEditor = buildKeyValueEditor(heat.alloy_composition, locked);
-    card.appendChild(compositionEditor.container);
-    if (!heat.alloy_composition) card.appendChild(tag("missing", "no composition found"));
+    foundZone.appendChild(compositionEditor.container);
+    if (!heat.alloy_composition) foundZone.appendChild(tag("missing", "no composition found"));
 
     const segAttested = el("input", { type: "checkbox", disabled: locked ? "disabled" : null });
     segAttested.checked = heat.segregation_attested;
@@ -428,17 +461,21 @@
     const segNote = el("textarea", { rows: "2", disabled: locked ? "disabled" : null });
     segNote.value = heat.segregation_note || "";
 
-    card.append(
+    foundZone.append(
       el("label", { style: "display:flex;align-items:center;gap:0.4rem;font-weight:normal" }, [segAttested, document.createTextNode("Segregation attested")]),
       el("label", { text: "Attested by" }),
       segBy,
       el("label", { text: "Segregation note" }),
       segNote
     );
+    card.appendChild(foundZone);
 
-    card.appendChild(el("label", { text: "Feedstock sub-lots" }));
+    // Zone: Feedstock sub-lots / compliance table — its own visually
+    // separated section rather than appended after everything else.
+    const sublotZone = el("div", { class: "zone zone-sublots" }, [el("div", { class: "zone-title", text: "Feedstock sub-lots" })]);
     const sublotEditor = buildSublotEditor(heat.sublots, locked);
-    card.appendChild(sublotEditor.container);
+    sublotZone.appendChild(sublotEditor.container);
+    card.appendChild(sublotZone);
 
     if (!locked) {
       card.appendChild(

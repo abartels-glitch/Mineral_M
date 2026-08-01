@@ -61,13 +61,21 @@ header nav a:hover { color: var(--text); }
 header nav a.active { color: var(--text); font-weight: 600; }
 
 main {
-  max-width: 960px;
+  max-width: 1100px;
   margin: 0 auto;
   padding: 1.5rem;
   display: flex;
   flex-direction: column;
   gap: 1.5rem;
 }
+
+/* Single-focused-task pages (scan, log in) get a deliberately narrower
+   centered column instead of stretching a short form/file-picker to the
+   same width as the content-heavy pages — same page-title-then-content
+   shell, different content width. */
+main.narrow { max-width: 480px; }
+
+.page-title { font-size: 1.6rem; margin: 0; }
 
 .panel {
   background: var(--panel);
@@ -100,7 +108,6 @@ button {
   font-size: 0.9rem;
 }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
-button.secondary { background: transparent; color: var(--text); }
 
 table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
@@ -129,7 +136,11 @@ pre {
 .doc-list li:hover { background: var(--bg); }
 .doc-list li.selected { background: var(--bg); outline: 1px solid var(--border); }
 
-.side-by-side { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+/* auto-fit rather than a fixed 1fr 1fr — when the review panel is
+   hidden (no document selected yet), the Documents panel is the only
+   grid item and correctly fills the full width instead of sitting in
+   a reserved half-width column next to empty space. */
+.side-by-side { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 1rem; }
 .side-by-side > * { min-width: 0; }
 @media (max-width: 700px) { .side-by-side { grid-template-columns: 1fr; } }
 
@@ -166,11 +177,22 @@ pre {
 .verdict.insufficient_data { background: var(--insufficient-bg); color: var(--insufficient); }
 .verdict.revoked { background: var(--revoked-bg); color: var(--revoked); }
 
-.node-status { font-weight: 700; }
-.node-status.pass { color: var(--pass); }
-.node-status.fail { color: var(--fail); }
-.node-status.insufficient_data { color: var(--insufficient); }
-.node-status.revoked { color: var(--revoked); }
+/* Same pill language as .tag below, rather than bare colored text — a
+   status indicator should look the same everywhere it appears. */
+.node-status {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.node-status.pass { background: var(--pass-bg); color: var(--pass); }
+.node-status.fail { background: var(--fail-bg); color: var(--fail); }
+.node-status.insufficient_data { background: var(--insufficient-bg); color: var(--insufficient); }
+.node-status.revoked { background: var(--revoked-bg); color: var(--revoked); }
 
 .chain-note {
   border: 1px solid var(--border);
@@ -215,6 +237,30 @@ pre {
   gap: 0.5rem;
   margin-bottom: 0.75rem;
 }
+
+/* Three visual zones per review card: quiet "Found" fields, a warning
+   callout for "Needs attention" (flags + corrections — escalates to
+   fail-red when a blocking flag is present, not just amber), and the
+   sub-lot/compliance table, each visually separated instead of one
+   undifferentiated stack. */
+.zone { margin-bottom: 1.25rem; }
+.zone:last-child { margin-bottom: 0; }
+.zone-title {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  margin: 0 0 0.5rem 0;
+}
+.zone-attention {
+  border: 1px solid var(--insufficient);
+  background: var(--insufficient-bg);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+}
+.zone-attention.blocking { border-color: var(--fail); background: var(--fail-bg); }
+.zone-attention .zone-title { color: inherit; opacity: 0.85; }
 .heat-card-header h3 { margin: 0; font-size: 0.95rem; }
 
 .tag {
