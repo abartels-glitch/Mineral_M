@@ -572,8 +572,31 @@ def review_heat(
     sublot_flag_lists = [
         _evaluate_sublot_flag(s, sublot_id=sid) for s, sid in zip(sublot_dicts, sublot_row_ids, strict=True)
     ]
-    heat_flags = [f for flist in sublot_flag_lists for f in flist]
-    still_flagged = bool(heat_flags)
+    # Heat-level (sublot_id is None) flags — anything the LLM itself
+    # noticed at extraction, as opposed to a sub-lot-level compliance_engine
+    # check — must survive this UPDATE, not just sub-lot flags. They used
+    # to be silently dropped: this function rebuilt flags_json from sub-lot
+    # checks alone, so any heat-level flag vanished the moment /review was
+    # submitted, whether or not the reviewer ever addressed it, with
+    # nothing in the audit log to show it happened. Reading them straight
+    # from the current row (not some earlier snapshot) means a resolution
+    # already applied via /correct before this call is respected as-is,
+    # not reverted — /correct's field-target branch resolves flags on this
+    # exact flags_json in place, so whatever's there now already reflects
+    # that. Sub-lot-level flags are still fully recomputed below, since
+    # that path was never broken — sublot ids can also legitimately change
+    # (the upsert-by-id logic above), so re-deriving them fresh against
+    # current sub-lot data, rather than trying to carry old copies forward,
+    # is correct, not a shortcut.
+    existing_flags = json.loads(heat["flags_json"])
+    existing_heat_level_flags = [f for f in existing_flags if not f.get("sublot_id")]
+    heat_flags = existing_heat_level_flags + [f for flist in sublot_flag_lists for f in flist]
+    # _any_open, not bool(heat_flags): a preserved heat-level flag can be
+    # resolved (its status carried over as-is from the row above), so the
+    # list being non-empty no longer means there's an open issue — unlike
+    # before this fix, when heat_flags only ever held freshly-computed
+    # sub-lot flags, which are always open by construction.
+    still_flagged = _any_open(heat_flags)
 
     reviewed_at = now_iso()
     conn.execute(
@@ -633,7 +656,24 @@ def review_heat(
                 ),
             )
     conn.commit()
-    audit.record(conn, "document_heat", heat_id, "reviewed", actor=current_user["email"])
+    # Records open-flag state on both sides of this submission — the
+    # heat-level flag-drop bug this guards against existed specifically
+    # because nothing in the audit trail showed a review's effect on
+    # flags_json, only that "reviewed" happened.
+    def _open_flag_summary(flags):
+        return [
+            {"issue_type": f["issue_type"], "field_name": f.get("field_name"), "sublot_id": f.get("sublot_id")}
+            for f in flags
+            if f.get("status") != "resolved"
+        ]
+
+    audit.record(
+        conn, "document_heat", heat_id, "reviewed", actor=current_user["email"],
+        detail={
+            "open_flags_before": _open_flag_summary(existing_flags),
+            "open_flags_after": _open_flag_summary(heat_flags),
+        },
+    )
 
     updated = conn.execute("SELECT * FROM document_heats WHERE id = ?", (heat_id,)).fetchone()
     return _row_to_heat(conn, updated)

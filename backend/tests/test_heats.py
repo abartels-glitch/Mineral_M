@@ -15,6 +15,7 @@ import auth
 import crypto_utils
 import llm_extractor
 import main
+import review_flags
 import storage
 from db import SCHEMA
 
@@ -216,8 +217,24 @@ def test_review_heat_locks_after_review(client, conn):
     reviewed = resp.json()
     assert reviewed["reviewed"] is True
     assert reviewed["source"] == "human"
-    assert reviewed["flagged_for_review"] is False  # corrected sub-lot is now high-confidence domestic
     assert reviewed["alloy_composition"] == {"Nd": 29.5, "Fe": 68.2, "B": 1.0}
+
+    # The sub-lot flag IS resolved: the corrected sub-lot is now
+    # high-confidence domestic, so the fresh compliance_engine check
+    # against it comes back clean.
+    sublot_flags = reviewed["sublots"][0]["flags"]
+    assert all(f["status"] != "open" for f in sublot_flags)
+    # But the regex fallback's own heat-level flag ("needs full manual
+    # review") is untouched by any of this, and correctly stays open —
+    # a heat-level extraction flag must survive /review unless it's
+    # actually been resolved (e.g. via /correct), not get silently
+    # dropped just because the form was submitted. Before the review_heat
+    # merge fix, this flag was unconditionally wiped by /review
+    # regardless of whether anything addressed it, which is what this
+    # assertion used to (incorrectly) rely on.
+    assert reviewed["flagged_for_review"] is True
+    extraction_flag = next(f for f in reviewed["flags"] if f["source"] == "extraction")
+    assert extraction_flag["status"] == "open"
 
     again = client.post(f"/documents/{doc_id}/heats/{heat_id}/review", json=review_body)
     assert again.status_code == 409
@@ -238,6 +255,142 @@ def test_review_heat_requires_org_match(client, conn):
     client.post("/auth/login", json={"email": "b@example.com", "password": "pw"})
     resp = client.post(f"/documents/{doc_id}/heats/{heat_id}/review", json={"sublots": []})
     assert resp.status_code == 403
+
+
+# --- heat-level extraction flags must survive /review, not get silently
+# dropped (review_heat used to rebuild flags_json from sub-lot checks
+# alone and overwrite the whole array) --------------------------------
+
+
+def _heat_with_heat_level_flag(heat_id=None):
+    """No sub-lot-level issue at all — the sole flag is heat-level
+    (sublot_id=None), on a field (`heat_id`) that IS backend-correctable,
+    so a resolved-via-/correct regression test can exercise a real
+    correction rather than a field /correct can't actually save."""
+    return {
+        "heat_id": heat_id,
+        "alloy_composition": {"Nd": 29.4, "Fe": 68.3, "B": 1.1, "Dy": 1.2},
+        "test_results": None,
+        "nonconformance_refs": [],
+        "feedstock_sublots": [
+            {"sublot_id": None, "blend_pct": 100.0, "origin_country": "United States", "origin_confidence": "high", "notes": None}
+        ],
+        "segregation_attested": True,
+        "segregation_note": "Dedicated line.",
+        "mass_kg": 195.0,
+        "confidence": 0.8,
+        "flags": [
+            review_flags.make_flag(
+                "missing_field",
+                "No heat/melt number stated in the certificate.",
+                source="extraction",
+                field_name="heat_id",
+            ).model_dump()
+        ],
+        "source": "llm",
+    }
+
+
+def _review_body_from_heat(heat, **overrides):
+    sublot = heat["sublots"][0]
+    body = {
+        "heat_id": heat["heat_id"],
+        "alloy_composition": heat["alloy_composition"],
+        "mass_kg": heat["mass_kg"],
+        "segregation_attested": heat["segregation_attested"],
+        "segregation_note": heat["segregation_note"],
+        "sublots": [
+            {
+                "id": sublot["id"],
+                "sublot_id": sublot["sublot_id"],
+                "blend_pct": sublot["blend_pct"],
+                "origin_country": sublot["origin_country"],
+                "origin_confidence": sublot["origin_confidence"],
+                "notes": sublot["notes"],
+            }
+        ],
+    }
+    body.update(overrides)
+    return body
+
+
+def test_review_preserves_heat_level_extraction_flag_when_unaddressed(client, conn, monkeypatch):
+    """Regression: a heat whose only issue is a heat-level extraction
+    flag, submitted via /review with no changes (the flagged field
+    still unaddressed), must still show that flag open afterward — not
+    silently read as clean because review_heat rebuilt flags_json from
+    sub-lot checks alone and threw the heat-level flag away."""
+    monkeypatch.setattr(
+        llm_extractor,
+        "extract_structured",
+        lambda raw_text: {
+            "certificate_id": "CERT-1",
+            "supplier_id": "Rio Grande Magnetics, LLC",
+            "signatures": [],
+            "heats": [_heat_with_heat_level_flag()],
+        },
+    )
+    _login_org_user(client, conn)
+    upload = _upload(client, filename="flagged.txt").json()
+    doc_id = upload["id"]
+    heat = upload["heats"][0]
+    assert heat["flagged_for_review"] is True
+    assert any(f["issue_type"] == "missing_field" and f["status"] == "open" for f in heat["flags"])
+
+    resp = client.post(
+        f"/documents/{doc_id}/heats/{heat['id']}/review",
+        json=_review_body_from_heat(heat),  # unchanged — heat_id is still None
+    )
+    assert resp.status_code == 200
+    reviewed = resp.json()
+
+    missing_flag = next((f for f in reviewed["flags"] if f["issue_type"] == "missing_field"), None)
+    assert missing_flag is not None, "heat-level extraction flag was dropped by /review"
+    assert missing_flag["status"] == "open"
+    assert reviewed["flagged_for_review"] is True
+    assert reviewed["fully_addressed"] is False
+
+
+def test_review_does_not_reopen_a_flag_already_resolved_via_correct(client, conn, monkeypatch):
+    """Regression, the /correct + /review composition case: a flag
+    resolved via /correct before /review is ever submitted must stay
+    resolved — the merge in review_heat reads current flags_json (which
+    already reflects the /correct resolution), it doesn't revert to some
+    earlier snapshot."""
+    monkeypatch.setattr(
+        llm_extractor,
+        "extract_structured",
+        lambda raw_text: {
+            "certificate_id": "CERT-1",
+            "supplier_id": "Rio Grande Magnetics, LLC",
+            "signatures": [],
+            "heats": [_heat_with_heat_level_flag()],
+        },
+    )
+    _login_org_user(client, conn)
+    upload = _upload(client, filename="flagged3.txt").json()
+    doc_id = upload["id"]
+    heat = upload["heats"][0]
+
+    corrected = client.post(
+        f"/documents/{doc_id}/heats/{heat['id']}/correct",
+        json={"target": "heat", "field_name": "heat_id", "corrected_value": "H-FIXED"},
+    )
+    assert corrected.status_code == 200
+    missing_flag = next(f for f in corrected.json()["flags"] if f["issue_type"] == "missing_field")
+    assert missing_flag["status"] == "resolved"
+
+    resp = client.post(
+        f"/documents/{doc_id}/heats/{heat['id']}/review",
+        json=_review_body_from_heat(heat, heat_id="H-FIXED"),
+    )
+    assert resp.status_code == 200
+    reviewed = resp.json()
+
+    missing_flag_after = next(f for f in reviewed["flags"] if f["issue_type"] == "missing_field")
+    assert missing_flag_after["status"] == "resolved", "a flag already resolved via /correct must not be reopened by /review"
+    assert reviewed["flagged_for_review"] is False
+    assert reviewed["fully_addressed"] is True
 
 
 def test_credential_issue_requires_reviewed_heat(client, conn):
