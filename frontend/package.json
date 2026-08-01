@@ -1,0 +1,12 @@
+{
+  "name": "feoc-passport-frontend",
+  "private": true,
+  "description": "Regression tests for the no-build-step vanilla-JS frontend (backend has its own pytest suite under backend/tests/). jsdom is the only dependency — no build step, no framework, matching the app itself.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "type": "commonjs",
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}

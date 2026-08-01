@@ -196,6 +196,35 @@
 
     for (const { target, sublot, flag } of targets) {
       const currentValue = target === "heat" ? heat[flag.field_name] : sublot[flag.field_name];
+      const label = target === "sublot" ? `Sub-lot ${sublot.sublot_id || sublot.id.slice(0, 6)} · ${flag.field_name}` : flag.field_name;
+
+      // Structured (object-shaped) fields — alloy_composition, test_results
+      // — don't go through the text-input/quick-save path below: the
+      // backend's /correct endpoint only accepts scalar corrections for
+      // heat-level fields (see main.py's _HEAT_CORRECTABLE_FIELDS), so
+      // there's no working save call to wire up here yet. Rendered as a
+      // real structured (read-only) view of the actual value — reusing
+      // the same key/value editor the Found section uses, just locked —
+      // instead of the raw value getting silently stringified into a
+      // plain input, which used to render as literal "[object Object]".
+      if (currentValue !== null && typeof currentValue === "object") {
+        container.appendChild(
+          el("div", { class: "correction-row" }, [
+            el("span", { class: "correction-label", text: label }),
+            el("span", { class: "muted", text: flag.human_readable_reason }),
+          ])
+        );
+        container.appendChild(buildKeyValueEditor(currentValue, true).container);
+        container.appendChild(
+          el("p", { class: "muted", style: "margin: 0 0 0.6rem 0; font-size: 0.75rem" }, [
+            document.createTextNode(
+              "Per-field correction for this field isn't available yet — edit it in the Found section below and submit the review to update it."
+            ),
+          ])
+        );
+        continue;
+      }
+
       const input = el("input", { type: "text", value: currentValue ?? "" });
       const saveBtn = el("button", {
         class: "icon-btn",
@@ -220,7 +249,6 @@
           }
         },
       });
-      const label = target === "sublot" ? `Sub-lot ${sublot.sublot_id || sublot.id.slice(0, 6)} · ${flag.field_name}` : flag.field_name;
       container.appendChild(
         el("div", { class: "correction-row" }, [
           el("span", { class: "correction-label", text: label }),

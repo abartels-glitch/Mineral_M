@@ -6,3 +6,4 @@ venv/
 *.db
 .pytest_cache/
 .env
+node_modules/
