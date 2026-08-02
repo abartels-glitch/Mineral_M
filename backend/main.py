@@ -280,6 +280,84 @@ def _fetch_heats(conn, document_id: str) -> list[HeatOut]:
     return [_row_to_heat(conn, r) for r in rows]
 
 
+# --- ownership helpers ----------------------------------------------------
+#
+# These are the *only* sanctioned way to fetch a document/heat/credential
+# by id anywhere in this file. A route that needs one of these rows must
+# go through the corresponding function below — there is no other path
+# to the row that doesn't also run the org-ownership check. This exists
+# because org-isolation gaps kept getting introduced by routes fetching a
+# row directly and either hand-rolling their own ownership check (drift
+# risk: two implementations of the same rule) or simply forgetting one
+# (GET /credentials, /credentials/issue's sources[] — see git history).
+#
+# Each resource has two forms:
+#   require_owned_*  — a plain function, for use inside a route body
+#                       (loops over a body-supplied list of ids, or an id
+#                       that isn't a path parameter at all).
+#   owned_*           — a FastAPI dependency wrapping the same function,
+#                       for routes where the id *is* a path parameter:
+#                       declaring it in the route signature is the only
+#                       way that route can obtain the row at all.
+
+
+def require_owned_document(conn, current_user: dict, document_id: str) -> dict:
+    row = conn.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "document not found")
+    auth.require_org_match(current_user, row["org_id"])
+    return dict(row)
+
+
+def owned_document(document_id: str, current_user: dict = Depends(auth.get_current_user), conn=Depends(get_db)) -> dict:
+    return require_owned_document(conn, current_user, document_id)
+
+
+def require_owned_heat(conn, current_user: dict, document_id: str, heat_id: str) -> dict:
+    """document_id and heat_id both known up front (path-param routes).
+    Scoping the heat fetch itself to document_id means a heat_id that
+    exists but belongs to a different document 404s here too, same as
+    before this helper existed."""
+    require_owned_document(conn, current_user, document_id)
+    row = conn.execute(
+        "SELECT * FROM document_heats WHERE id = ? AND document_id = ?", (heat_id, document_id)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "heat not found")
+    return dict(row)
+
+
+def owned_heat(
+    document_id: str, heat_id: str, current_user: dict = Depends(auth.get_current_user), conn=Depends(get_db)
+) -> dict:
+    return require_owned_heat(conn, current_user, document_id, heat_id)
+
+
+def require_owned_heat_by_id(conn, current_user: dict, heat_id: str) -> dict:
+    """heat_id only, no document_id in scope — /credentials/issue's
+    body.heat_id shape. Fetches the heat first and derives its owning
+    document from the row, then applies the identical org check."""
+    heat = conn.execute("SELECT * FROM document_heats WHERE id = ?", (heat_id,)).fetchone()
+    if heat is None:
+        raise HTTPException(404, "heat not found")
+    require_owned_document(conn, current_user, heat["document_id"])
+    return dict(heat)
+
+
+def require_owned_credential(conn, current_user: dict, credential_id: str) -> dict:
+    row = conn.execute("SELECT * FROM credentials WHERE id = ?", (credential_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, f"credential {credential_id} not found")
+    auth.require_org_match(current_user, row["issuer_id"])
+    return dict(row)
+
+
+def owned_credential(
+    credential_id: str, current_user: dict = Depends(auth.get_current_user), conn=Depends(get_db)
+) -> dict:
+    return require_owned_credential(conn, current_user, credential_id)
+
+
 def _user_out(conn, user: dict) -> UserOut:
     org_name = None
     if user.get("org_id"):
@@ -483,7 +561,7 @@ async def upload_document(
 @app.get("/documents", response_model=list[DocumentDetail])
 def list_documents(current_user: dict = Depends(auth.get_current_user), conn=Depends(get_db)):
     auth.require_role(current_user, "org_user", "platform_admin")
-    if current_user["role"] == "platform_admin":
+    if auth.is_cross_org_reader(current_user):
         rows = conn.execute("SELECT * FROM documents ORDER BY uploaded_at DESC").fetchall()
     else:
         rows = conn.execute(
@@ -506,21 +584,22 @@ def list_documents(current_user: dict = Depends(auth.get_current_user), conn=Dep
 
 
 @app.get("/documents/{document_id}", response_model=DocumentDetail)
-def get_document(document_id: str, current_user: dict = Depends(auth.get_current_user), conn=Depends(get_db)):
+def get_document(
+    document_id: str,
+    current_user: dict = Depends(auth.get_current_user),
+    doc: dict = Depends(owned_document),
+    conn=Depends(get_db),
+):
     auth.require_role(current_user, "org_user", "platform_admin")
-    row = conn.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
-    if row is None:
-        raise HTTPException(404, "document not found")
-    auth.require_org_match(current_user, row["org_id"])
     return DocumentDetail(
-        id=row["id"],
-        filename=row["filename"],
-        document_type=row["document_type"],
-        raw_text=row["raw_text"],
-        status=row["status"],
-        uploaded_at=row["uploaded_at"],
-        certificate_id=row["certificate_id"],
-        supplier_id=row["supplier_id"],
+        id=doc["id"],
+        filename=doc["filename"],
+        document_type=doc["document_type"],
+        raw_text=doc["raw_text"],
+        status=doc["status"],
+        uploaded_at=doc["uploaded_at"],
+        certificate_id=doc["certificate_id"],
+        supplier_id=doc["supplier_id"],
         heats=_fetch_heats(conn, document_id),
     )
 
@@ -531,18 +610,10 @@ def review_heat(
     heat_id: str,
     body: HeatReviewRequest,
     current_user: dict = Depends(auth.get_current_user),
+    heat: dict = Depends(owned_heat),
     conn=Depends(get_db),
 ):
     auth.require_role(current_user, "org_user")
-    doc = conn.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
-    if doc is None:
-        raise HTTPException(404, "document not found")
-    auth.require_org_match(current_user, doc["org_id"])
-    heat = conn.execute(
-        "SELECT * FROM document_heats WHERE id = ? AND document_id = ?", (heat_id, document_id)
-    ).fetchone()
-    if heat is None:
-        raise HTTPException(404, "heat not found")
     if heat["reviewed"]:
         raise HTTPException(409, "heat already reviewed; a new review cycle is required to change it")
 
@@ -685,6 +756,7 @@ def correct_field(
     heat_id: str,
     body: FieldCorrectionRequest,
     current_user: dict = Depends(auth.get_current_user),
+    heat: dict = Depends(owned_heat),
     conn=Depends(get_db),
 ):
     """Corrects one field in place — unlike /review, this is allowed any
@@ -695,16 +767,6 @@ def correct_field(
     use, so a corrected origin_country picks up a fresh compliance_violation
     flag exactly as if it had been that way from the start."""
     auth.require_role(current_user, "org_user")
-    doc = conn.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
-    if doc is None:
-        raise HTTPException(404, "document not found")
-    auth.require_org_match(current_user, doc["org_id"])
-    heat = conn.execute(
-        "SELECT * FROM document_heats WHERE id = ? AND document_id = ?", (heat_id, document_id)
-    ).fetchone()
-    if heat is None:
-        raise HTTPException(404, "heat not found")
-
     actor = current_user["email"]
     corrected_at = now_iso()
     sublot_row_id = None
@@ -807,6 +869,7 @@ def get_heat_audit_trail(
     document_id: str,
     heat_id: str,
     current_user: dict = Depends(auth.get_current_user),
+    heat: dict = Depends(owned_heat),
     conn=Depends(get_db),
 ):
     """Reviewed/corrected events for one heat, independent of whether a
@@ -815,15 +878,6 @@ def get_heat_audit_trail(
     correction landed without first issuing a credential just to reach
     /credentials/{id}/audit-trail's Timeline."""
     auth.require_role(current_user, "org_user", "platform_admin")
-    doc = conn.execute("SELECT * FROM documents WHERE id = ?", (document_id,)).fetchone()
-    if doc is None:
-        raise HTTPException(404, "document not found")
-    auth.require_org_match(current_user, doc["org_id"])
-    heat = conn.execute(
-        "SELECT id FROM document_heats WHERE id = ? AND document_id = ?", (heat_id, document_id)
-    ).fetchone()
-    if heat is None:
-        raise HTTPException(404, "heat not found")
     rows = conn.execute(
         "SELECT action, actor, detail_json, created_at FROM audit_log WHERE entity_type = 'document_heat' AND entity_id = ? ORDER BY created_at",
         (heat_id,),
@@ -846,7 +900,12 @@ def list_issuers(current_user: dict = Depends(auth.get_current_user), conn=Depen
 
 @app.get("/credentials")
 def list_credentials(current_user: dict = Depends(auth.get_current_user), conn=Depends(get_db)):
-    rows = conn.execute("SELECT * FROM credentials ORDER BY issued_at DESC").fetchall()
+    if auth.is_cross_org_reader(current_user):
+        rows = conn.execute("SELECT * FROM credentials ORDER BY issued_at DESC").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM credentials WHERE issuer_id = ? ORDER BY issued_at DESC", (current_user["org_id"],)
+        ).fetchall()
     return [
         {
             "id": r["id"],
@@ -876,12 +935,7 @@ def issue_credential(
     document_content_hash = None
     supersedes_credential_id = None
     if body.heat_id is not None:
-        heat = conn.execute("SELECT * FROM document_heats WHERE id = ?", (body.heat_id,)).fetchone()
-        if heat is None:
-            raise HTTPException(404, "heat not found")
-        doc = conn.execute("SELECT * FROM documents WHERE id = ?", (heat["document_id"],)).fetchone()
-        if doc["org_id"] != issuer_id:
-            raise HTTPException(403, "heat belongs to a different organization")
+        heat = require_owned_heat_by_id(conn, current_user, body.heat_id)
         if not heat["reviewed"]:
             raise HTTPException(400, "heat must be reviewed before a credential can be issued from it")
         if heat["credential_id"]:
@@ -898,13 +952,20 @@ def issue_credential(
             if existing and not existing["revoked_at"]:
                 raise HTTPException(409, "a credential has already been issued from this heat")
             supersedes_credential_id = heat["credential_id"]
+        # Already ownership-verified by require_owned_heat_by_id above —
+        # this is just the plain document row for its content_hash.
+        doc = conn.execute("SELECT * FROM documents WHERE id = ?", (heat["document_id"],)).fetchone()
         document_id = doc["id"]
         document_content_hash = doc["content_hash"]
 
     for source_id in body.sources:
-        parent = conn.execute("SELECT id FROM credentials WHERE id = ?", (source_id,)).fetchone()
-        if parent is None:
-            raise HTTPException(404, f"source credential {source_id} not found")
+        # Same-org-only for now: without this, this org's new credential
+        # could cite another org's real credential as a parent with no
+        # consent from the org that actually issued it. A real cross-org
+        # composite-credential workflow would need an explicit
+        # consent/transfer step that doesn't exist yet; until it does,
+        # sourcing stays same-org-only.
+        require_owned_credential(conn, current_user, source_id)
 
     credential_id = uuid.uuid4().hex
     issued_at = now_iso()
@@ -1044,18 +1105,13 @@ def get_uii_image(credential_id: str, request: Request, conn=Depends(get_db)):
 
 
 @app.get("/credentials/{credential_id}/audit-trail")
-def get_audit_trail(credential_id: str, current_user: dict = Depends(auth.get_current_user), conn=Depends(get_db)):
+def get_audit_trail(credential_id: str, credential: dict = Depends(owned_credential), conn=Depends(get_db)):
     """Everything the public /passport/{id} view doesn't show: who
     reviewed/issued this credential and when, and (if it came from a
     document) the originating heat's extraction/review detail — original
     confidence, whether it was flagged, and its sub-lot table. Login-
     only — the extra depth is what makes buyer_auditor's role
     meaningfully more than the public passport lookup."""
-    credential = conn.execute("SELECT * FROM credentials WHERE id = ?", (credential_id,)).fetchone()
-    if credential is None:
-        raise HTTPException(404, "credential not found")
-    auth.require_org_match(current_user, credential["issuer_id"])
-
     audit_rows = conn.execute(
         "SELECT action, actor, detail_json, created_at FROM audit_log WHERE entity_type = 'credential' AND entity_id = ? ORDER BY created_at",
         (credential_id,),
