@@ -1,3 +1,9 @@
+[tool.pytest.ini_options]
+markers = [
+    "slow: subprocess-based/integration tests (real uvicorn process, real threads) -- excluded from the default run so the fast unit-test loop isn't dragged down; run with `pytest -m slow` (or `pytest -m \"\"` for everything).",
+]
+addopts = "-m 'not slow'"
+
 [tool.ruff]
 # 160 rather than the 88/120 default — this codebase has long inline SQL
 # strings and test payload literals that aren't worth manually reflowing.

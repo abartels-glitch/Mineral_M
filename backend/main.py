@@ -118,6 +118,14 @@ _SUBLOT_CORRECTABLE_FIELDS: dict[str, type] = {
     "notes": str,
 }
 
+# Bound on correct_field's compare-and-swap retry loop (see its use
+# below) — two concurrent corrections to different fields on the same
+# heat both read-modify-write the shared flags_json blob, so a retry is
+# needed to avoid a silent lost update; real contention this deep is
+# essentially never sustained, so exhausting this is a signal something
+# else is wrong, not routine load.
+_CAS_MAX_RETRIES = 5
+
 
 def _coerce_corrected_value(raw: Optional[str], field_type: type):
     if raw is None or raw == "":
@@ -215,13 +223,27 @@ def _revoke_stale_credential(conn, heat_credential_id: Optional[str], actor: str
     subject." A false-positive revoke costs a reviewer a quick reissue;
     a false-negative leaves a stale PASS live. Idempotent — a credential
     already revoked (by an earlier correction to the same heat) is left
-    alone rather than re-stamped or re-audited."""
+    alone rather than re-stamped or re-audited.
+
+    Two concurrent corrections on the same heat can both reach this
+    function with the same heat_credential_id, each independently
+    deciding it needs revoking. `WHERE revoked_at IS NULL`, checked via
+    rowcount, is the actual guard against a duplicate revoke — not a
+    prior SELECT. (A separate read-then-write here would happen to be
+    safe today too, because of where this call sits inside the caller's
+    already-open transaction relative to correct_field's own earlier
+    writes — but that's incidental to call order, not a guarantee, and
+    isn't something to depend on.) Only the request whose UPDATE
+    actually matched a row writes the audit entry, so a race never
+    produces two 'revoked' entries for one credential."""
     if heat_credential_id is None:
         return
-    credential = conn.execute("SELECT revoked_at FROM credentials WHERE id = ?", (heat_credential_id,)).fetchone()
-    if credential is None or credential["revoked_at"]:
+    cas = conn.execute(
+        "UPDATE credentials SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+        (revoked_at, heat_credential_id),
+    )
+    if cas.rowcount == 0:
         return
-    conn.execute("UPDATE credentials SET revoked_at = ? WHERE id = ?", (revoked_at, heat_credential_id))
     audit.record(
         conn, "credential", heat_credential_id, "revoked", actor=actor,
         detail={"reason": reason},
@@ -670,14 +692,27 @@ def review_heat(
     still_flagged = _any_open(heat_flags)
 
     reviewed_at = now_iso()
-    conn.execute(
+    # Compare-and-swap, not a blind UPDATE: `reviewed = 0` blocks a second
+    # concurrent /review submission on the same heat from also winning
+    # (both would otherwise read reviewed=0 before either commits and
+    # both apply, silently overwriting each other with two duplicate
+    # 'reviewed' audit entries). `heat_id IS ? AND mass_kg IS ? AND
+    # flags_json = ?` additionally guards the two columns /correct can
+    # independently touch on this same row: if a correction lands
+    # concurrently and changes any of them, this WHERE no longer matches
+    # the row this review was actually written against, and the
+    # reviewer's now-stale full-replace form is rejected with a 409
+    # instead of silently clobbering the correction. Values are exactly
+    # what `heat` (read once, at request start) held — the row's own
+    # current state doubles as its version, no schema change needed.
+    cas = conn.execute(
         """
         UPDATE document_heats
         SET heat_id = ?, alloy_composition_json = ?, test_results_json = ?, nonconformance_refs_json = ?,
             segregation_attested = ?, segregation_attested_by = ?, segregation_note = ?, mass_kg = ?,
             source = 'human', flagged_for_review = ?, flags_json = ?,
             reviewed = 1, reviewed_by = ?, reviewed_at = ?
-        WHERE id = ?
+        WHERE id = ? AND reviewed = 0 AND heat_id IS ? AND mass_kg IS ? AND flags_json = ?
         """,
         (
             body.heat_id,
@@ -693,8 +728,17 @@ def review_heat(
             current_user["email"],
             reviewed_at,
             heat_id,
+            heat["heat_id"],
+            heat["mass_kg"],
+            heat["flags_json"],
         ),
     )
+    if cas.rowcount == 0:
+        conn.rollback()
+        raise HTTPException(
+            409,
+            "heat was modified by a concurrent review or correction; refresh and resubmit the review",
+        )
     stale_sublot_ids = existing_sublot_ids - claimed_ids
     for stale_id in stale_sublot_ids:
         conn.execute("DELETE FROM heat_sublots WHERE id = ?", (stale_id,))
@@ -774,75 +818,120 @@ def correct_field(
     if body.target == "heat":
         if body.field_name not in _HEAT_CORRECTABLE_FIELDS:
             raise HTTPException(400, f"heat field '{body.field_name}' cannot be corrected here")
-        previous_value = heat[body.field_name]
         corrected_value = _coerce_corrected_value(body.corrected_value, _HEAT_CORRECTABLE_FIELDS[body.field_name])
 
-        heat_flags = json.loads(heat["flags_json"])
-        _resolve_open_flags_for_field(heat_flags, body.field_name, actor, corrected_at)
-        sibling_sublot_rows = conn.execute("SELECT flags_json FROM heat_sublots WHERE heat_id = ?", (heat_id,)).fetchall()
-        heat_still_flagged = _any_open(_heat_own_flags(heat_flags)) or any(
-            _any_open(json.loads(r["flags_json"])) for r in sibling_sublot_rows
-        )
+        # Compare-and-swap on flags_json, retried on conflict rather than
+        # surfaced as an error: two /correct calls targeting DIFFERENT
+        # fields on the same heat both read-modify-write this one shared
+        # JSON blob (see upload_document), so whichever commits last can
+        # silently discard the other's flag resolution even though
+        # neither request did anything wrong — they aren't a real
+        # conflict, they just share storage. Re-reading fresh and
+        # retrying, instead of a 409 like review_heat's CAS below, means
+        # both corrections land correctly without either caller ever
+        # seeing an error for something that wasn't their fault.
+        for _attempt in range(_CAS_MAX_RETRIES):
+            current = conn.execute("SELECT * FROM document_heats WHERE id = ?", (heat_id,)).fetchone()
+            previous_value = current[body.field_name]
+            heat_flags = json.loads(current["flags_json"])
+            _resolve_open_flags_for_field(heat_flags, body.field_name, actor, corrected_at)
+            sibling_sublot_rows = conn.execute(
+                "SELECT flags_json FROM heat_sublots WHERE heat_id = ?", (heat_id,)
+            ).fetchall()
+            heat_still_flagged = _any_open(_heat_own_flags(heat_flags)) or any(
+                _any_open(json.loads(r["flags_json"])) for r in sibling_sublot_rows
+            )
 
-        conn.execute(
-            f"""
-            UPDATE document_heats
-            SET {body.field_name} = ?, source = 'human', flags_json = ?, flagged_for_review = ?
-            WHERE id = ?
-            """,
-            (corrected_value, json.dumps(heat_flags), 1 if heat_still_flagged else 0, heat_id),
-        )
+            cas = conn.execute(
+                f"""
+                UPDATE document_heats
+                SET {body.field_name} = ?, source = 'human', flags_json = ?, flagged_for_review = ?
+                WHERE id = ? AND flags_json = ?
+                """,
+                (
+                    corrected_value, json.dumps(heat_flags), 1 if heat_still_flagged else 0,
+                    heat_id, current["flags_json"],
+                ),
+            )
+            if cas.rowcount == 1:
+                break
+            conn.rollback()
+        else:
+            raise HTTPException(409, "too many concurrent corrections on this heat; please retry")
     else:
         if body.sublot_id is None:
             raise HTTPException(400, "sublot_id is required when target is 'sublot'")
         if body.field_name not in _SUBLOT_CORRECTABLE_FIELDS:
             raise HTTPException(400, f"sub-lot field '{body.field_name}' cannot be corrected here")
-        sublot = conn.execute(
-            "SELECT * FROM heat_sublots WHERE id = ? AND heat_id = ?", (body.sublot_id, heat_id)
-        ).fetchone()
-        if sublot is None:
-            raise HTTPException(404, "sub-lot not found")
-        previous_value = sublot[body.field_name]
         corrected_value = _coerce_corrected_value(body.corrected_value, _SUBLOT_CORRECTABLE_FIELDS[body.field_name])
 
-        sublot_flags = json.loads(sublot["flags_json"])
-        _resolve_open_flags_for_field(sublot_flags, body.field_name, actor, corrected_at)
+        # Same compare-and-swap-with-retry shape as the heat branch
+        # above, applied to both flags_json copies this branch writes:
+        # the sub-lot's own, and document_heats' flattened duplicate of
+        # it. A conflict on either re-reads and retries the whole
+        # attempt, so the two writes stay consistent with each other —
+        # a partial application (sub-lot updated but the heat-level copy
+        # not synced to match) would itself be a new inconsistency.
+        for _attempt in range(_CAS_MAX_RETRIES):
+            sublot = conn.execute(
+                "SELECT * FROM heat_sublots WHERE id = ? AND heat_id = ?", (body.sublot_id, heat_id)
+            ).fetchone()
+            if sublot is None:
+                raise HTTPException(404, "sub-lot not found")
+            previous_value = sublot[body.field_name]
 
-        # Re-run the same deterministic check extraction/`/review` use,
-        # against the corrected value — this is what makes a corrected
-        # origin_country pick up (or drop) a compliance_violation flag
-        # live, rather than just clearing whatever was flagged before.
-        updated_sublot = dict(sublot)
-        updated_sublot[body.field_name] = corrected_value
-        fresh_flags = _evaluate_sublot_flag(updated_sublot, sublot_id=body.sublot_id)
-        _append_fresh_flags(sublot_flags, fresh_flags, match_sublot=False)
-        sublot_still_flagged = _any_open(sublot_flags)
+            sublot_flags = json.loads(sublot["flags_json"])
+            _resolve_open_flags_for_field(sublot_flags, body.field_name, actor, corrected_at)
 
-        conn.execute(
-            f"UPDATE heat_sublots SET {body.field_name} = ?, flags_json = ?, flagged = ? WHERE id = ?",
-            (corrected_value, json.dumps(sublot_flags), 1 if sublot_still_flagged else 0, body.sublot_id),
-        )
+            # Re-run the same deterministic check extraction/`/review`
+            # use, against the corrected value — this is what makes a
+            # corrected origin_country pick up (or drop) a
+            # compliance_violation flag live, rather than just clearing
+            # whatever was flagged before.
+            updated_sublot = dict(sublot)
+            updated_sublot[body.field_name] = corrected_value
+            fresh_flags = _evaluate_sublot_flag(updated_sublot, sublot_id=body.sublot_id)
+            _append_fresh_flags(sublot_flags, fresh_flags, match_sublot=False)
+            sublot_still_flagged = _any_open(sublot_flags)
 
-        # document_heats.flags_json holds a flattened copy of this same
-        # flag (see upload_document/review_heat) — now that compliance_engine
-        # flags carry sublot_id, that copy can be resolved/refreshed
-        # precisely, without risking touching a sibling sub-lot's flag of
-        # the identical shape. flagged_for_review itself still never
-        # trusts this list directly (_heat_own_flags), only the sub-lot
-        # rows queried below — this sync is for accurate display only.
-        heat_flags = json.loads(heat["flags_json"])
-        _resolve_open_sublot_duplicate_flags(heat_flags, body.field_name, body.sublot_id, actor, corrected_at)
-        _append_fresh_flags(heat_flags, fresh_flags, match_sublot=True)
+            sublot_cas = conn.execute(
+                f"UPDATE heat_sublots SET {body.field_name} = ?, flags_json = ?, flagged = ? WHERE id = ? AND flags_json = ?",
+                (
+                    corrected_value, json.dumps(sublot_flags), 1 if sublot_still_flagged else 0,
+                    body.sublot_id, sublot["flags_json"],
+                ),
+            )
+            if sublot_cas.rowcount == 0:
+                conn.rollback()
+                continue
 
-        all_sublot_rows = conn.execute("SELECT flags_json FROM heat_sublots WHERE heat_id = ?", (heat_id,)).fetchall()
-        heat_still_flagged = _any_open(_heat_own_flags(heat_flags)) or any(
-            _any_open(json.loads(r["flags_json"])) for r in all_sublot_rows
-        )
-        conn.execute(
-            "UPDATE document_heats SET source = 'human', flags_json = ?, flagged_for_review = ? WHERE id = ?",
-            (json.dumps(heat_flags), 1 if heat_still_flagged else 0, heat_id),
-        )
-        sublot_row_id = body.sublot_id
+            # document_heats.flags_json holds a flattened copy of this same
+            # flag (see upload_document/review_heat) — now that compliance_engine
+            # flags carry sublot_id, that copy can be resolved/refreshed
+            # precisely, without risking touching a sibling sub-lot's flag of
+            # the identical shape. flagged_for_review itself still never
+            # trusts this list directly (_heat_own_flags), only the sub-lot
+            # rows queried below — this sync is for accurate display only.
+            current_heat = conn.execute("SELECT flags_json FROM document_heats WHERE id = ?", (heat_id,)).fetchone()
+            heat_flags = json.loads(current_heat["flags_json"])
+            _resolve_open_sublot_duplicate_flags(heat_flags, body.field_name, body.sublot_id, actor, corrected_at)
+            _append_fresh_flags(heat_flags, fresh_flags, match_sublot=True)
+
+            all_sublot_rows = conn.execute("SELECT flags_json FROM heat_sublots WHERE heat_id = ?", (heat_id,)).fetchall()
+            heat_still_flagged = _any_open(_heat_own_flags(heat_flags)) or any(
+                _any_open(json.loads(r["flags_json"])) for r in all_sublot_rows
+            )
+            heat_cas = conn.execute(
+                "UPDATE document_heats SET source = 'human', flags_json = ?, flagged_for_review = ? WHERE id = ? AND flags_json = ?",
+                (json.dumps(heat_flags), 1 if heat_still_flagged else 0, heat_id, current_heat["flags_json"]),
+            )
+            if heat_cas.rowcount == 0:
+                conn.rollback()
+                continue
+            sublot_row_id = body.sublot_id
+            break
+        else:
+            raise HTTPException(409, "too many concurrent corrections on this heat; please retry")
 
     audit.record(
         conn, "document_heat", heat_id, "field_corrected", actor=actor,
@@ -946,6 +1035,12 @@ def issue_credential(
             # reissue" step: nothing here reuses the old subject or
             # auto-fills anything — the reviewer fills out this same
             # form again with the corrected data.
+            #
+            # Fast-path check only, not the actual guard: two concurrent
+            # issuances from the same heat would both read credential_id
+            # as unset/revoked here before either commits. The real
+            # guard is the conditional UPDATE further down (checked via
+            # rowcount, not this read) — see its comment.
             existing = conn.execute(
                 "SELECT id, revoked_at FROM credentials WHERE id = ?", (heat["credential_id"],)
             ).fetchone()
@@ -1010,7 +1105,31 @@ def issue_credential(
         ),
     )
     if body.heat_id is not None:
-        conn.execute("UPDATE document_heats SET credential_id = ? WHERE id = ?", (credential_id, body.heat_id))
+        # The actual guard against two credentials being issued from the
+        # same heat: succeeds only if the heat still has no active
+        # (unrevoked) credential right now, not as of the read above.
+        # Two concurrent requests both attempting this UPDATE serialize
+        # at the database level (SQLite today, Postgres unchanged after
+        # the planned migration — this is standard row-level locking,
+        # nothing SQLite-specific) — whichever commits first wins the
+        # claim, and the second's WHERE clause then simply fails to
+        # match the now-claimed row. rowcount, not the earlier SELECT,
+        # is the source of truth for whether this request won.
+        claim = conn.execute(
+            """
+            UPDATE document_heats
+            SET credential_id = ?
+            WHERE id = ?
+              AND (
+                credential_id IS NULL
+                OR credential_id IN (SELECT id FROM credentials WHERE revoked_at IS NOT NULL)
+              )
+            """,
+            (credential_id, body.heat_id),
+        )
+        if claim.rowcount == 0:
+            conn.rollback()
+            raise HTTPException(409, "a credential has already been issued from this heat")
     # A real Construct #1 UII needs the issuer's registered iac+enterprise_id
     # (see db.py's issuers migration) — until that's set for a given issuer,
     # falling back to the bare credential_id as uii_code is deliberate, not

@@ -5,10 +5,19 @@ Postgres migration once the pilot needs concurrent writers, but that's not
 yet.
 """
 import json
+import os
 import sqlite3
 from pathlib import Path
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+# FEOC_DATA_DIR override exists for concurrency regression tests, which
+# need a real subprocess server (genuine OS-level concurrent connections
+# — a shared in-memory test connection can't reproduce a race between
+# two separate connections the way production's per-request connection
+# does) pointed at an isolated temp DB, not the real dev database.
+# storage.py/crypto_utils.py derive their own dirs from DATA_DIR at
+# import time, so setting this one env var before the subprocess starts
+# isolates the DB, object storage, and issuer keys together.
+DATA_DIR = Path(os.environ.get("FEOC_DATA_DIR") or Path(__file__).resolve().parent.parent / "data")
 DB_PATH = DATA_DIR / "passport.db"
 
 SCHEMA = """
