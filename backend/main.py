@@ -183,6 +183,30 @@ def _any_open(flags: list[dict]) -> bool:
     return any(f.get("status", "open") == "open" for f in flags)
 
 
+def _any_open_blocking(flags: list[dict]) -> bool:
+    # severity is stored on the flag itself (set once by review_flags.
+    # make_flag, never recomputed), so checking it directly is equivalent
+    # to checking issue_type membership in review_flags._BLOCKING_ISSUE_
+    # TYPES -- simpler, and it can't drift from that set since nothing
+    # ever mutates severity after creation.
+    return any(f.get("status", "open") == "open" and f.get("severity") == "blocking" for f in flags)
+
+
+def _heat_has_open_blocking_flag(conn, heat_row: dict) -> bool:
+    """Whether this heat currently has any open blocking flag -- its own
+    (excluding the flattened sub-lot duplicate, same reasoning as
+    _heat_own_flags below: that copy can be stale) or any of its
+    sub-lots' own, real flags_json. Mirrors exactly the pattern
+    _row_to_heat's `any_open`/`fully_addressed` and the correction CAS
+    loops already use for "is this heat actually addressed" -- this is
+    the same question, just narrowed to blocking severity."""
+    heat_flags = json.loads(heat_row["flags_json"])
+    if _any_open_blocking(_heat_own_flags(heat_flags)):
+        return True
+    sublot_rows = conn.execute("SELECT flags_json FROM heat_sublots WHERE heat_id = ?", (heat_row["id"],)).fetchall()
+    return any(_any_open_blocking(json.loads(r["flags_json"])) for r in sublot_rows)
+
+
 def _heat_own_flags(heat_flags: list[dict]) -> list[dict]:
     """document_heats.flags_json is written at upload/`/review` time as
     extraction_flags + a flattened copy of every sub-lot's
@@ -1062,6 +1086,22 @@ def issue_credential(
         heat = require_owned_heat_by_id(conn, current_user, body.heat_id)
         if not heat["reviewed"]:
             raise HTTPException(400, "heat must be reviewed before a credential can be issued from it")
+        # reviewed=True only means the review form was submitted once —
+        # it does not mean every flag is resolved (see HeatOut.fully_
+        # addressed, computed independently). A heat with an open
+        # blocking flag (e.g. an unresolved compliance_violation) must
+        # not be issuable, regardless of what the client's `subject`
+        # claims — this only ever applied to `body.heat_id` (fresh,
+        # uncorrected data), not to `body.sources`: an already-issued
+        # source credential's own compliance state is deferred to
+        # passport-compile-time re-evaluation, same as a revoked source
+        # already isn't blocked from being cited here today.
+        if _heat_has_open_blocking_flag(conn, heat):
+            raise HTTPException(
+                409,
+                "heat has an open blocking flag (e.g. an unresolved compliance violation) — "
+                "resolve it before issuing a credential",
+            )
         if heat["credential_id"]:
             # A credential already exists for this heat — only an
             # explicit reissue (the existing one revoked, e.g. by a

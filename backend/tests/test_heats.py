@@ -446,6 +446,68 @@ def test_credential_issue_requires_reviewed_heat(client, conn):
     assert double_issue.status_code == 409
 
 
+def test_credential_issue_requires_no_open_blocking_flag(client, conn):
+    """issue_credential used to check only heat["reviewed"] -- a heat
+    reviewed with an unresolved compliance_violation (e.g. a banned-
+    country sub-lot origin) could still have a credential issued from
+    it, with nothing on the backend to stop it. reviewed=True and
+    fully_addressed=False are not the same thing (see
+    test_corrections.py's test_fully_addressed_false_when_review_
+    submitted_with_open_blocking_flag, which reproduces the same China
+    sub-lot shape used here)."""
+    _login_org_user(client, conn)
+    upload = _upload(client).json()
+    doc_id = upload["id"]
+    heat_id = upload["heats"][0]["id"]
+
+    reviewed = client.post(
+        f"/documents/{doc_id}/heats/{heat_id}/review",
+        json={
+            "heat_id": "TR-0001",
+            "mass_kg": 50.0,
+            "sublots": [{"origin_country": "China", "origin_confidence": "high", "blend_pct": 100.0}],
+        },
+    ).json()
+    assert reviewed["reviewed"] is True
+    assert reviewed["fully_addressed"] is False
+    blocking_flag = next(f for f in reviewed["sublots"][0]["flags"] if f["issue_type"] == "compliance_violation")
+    assert blocking_flag["severity"] == "blocking"
+    assert blocking_flag["status"] == "open"
+
+    blocked = client.post(
+        "/credentials/issue",
+        json={
+            "credential_type": "collected_scrap_lot",
+            "heat_id": heat_id,
+            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "China"},
+            "sources": [],
+        },
+    )
+    assert blocked.status_code == 409, blocked.text
+
+    # Correcting the flagged origin resolves the blocking flag -- issuance
+    # should now be allowed, same as any other addressed heat.
+    client.post(
+        f"/documents/{doc_id}/heats/{heat_id}/correct",
+        json={
+            "target": "sublot",
+            "sublot_id": reviewed["sublots"][0]["id"],
+            "field_name": "origin_country",
+            "corrected_value": "United States",
+        },
+    )
+    allowed = client.post(
+        "/credentials/issue",
+        json={
+            "credential_type": "collected_scrap_lot",
+            "heat_id": heat_id,
+            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
+            "sources": [],
+        },
+    )
+    assert allowed.status_code == 200, allowed.text
+
+
 def test_extraction_stats_reflects_flagged_and_reviewed(client, conn):
     make_user(conn, "admin@example.com", "pw", "platform_admin")
     _login_org_user(client, conn)

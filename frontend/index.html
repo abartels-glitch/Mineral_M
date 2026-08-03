@@ -542,7 +542,10 @@
     const card = el("div", { class: "heat-card" });
     const statusEl = el("p", { class: "error" });
 
-    const hasBlockingFlag = (heat.flags || []).some((f) => f.severity === "blocking");
+    // status check matters, not just severity: a blocking flag that's
+    // already been resolved shouldn't keep the header/zone/issuance gate
+    // reading as "blocking" forever -- only an *open* one should.
+    const hasBlockingFlag = (heat.flags || []).some((f) => f.severity === "blocking" && f.status !== "resolved");
     const headerStatusTag = hasBlockingFlag
       ? tag("blocking", "blocking issue")
       : heat.flagged_for_review
@@ -687,7 +690,12 @@
             el("a", { href: `/passport.html?id=${heat.credential_id}`, text: "View revoked passport →" }),
           ])
         );
-        card.appendChild(renderIssuePanel(doc, heat));
+        // Whatever correction triggered this revocation may itself have
+        // introduced a fresh open blocking flag (e.g. a corrected origin
+        // that's now a covered country) -- the backend enforces this
+        // regardless, but no point showing a reissue form the API would
+        // just 409.
+        card.appendChild(hasBlockingFlag ? renderIssuanceBlockedNotice() : renderIssuePanel(doc, heat));
       } else {
         card.appendChild(
           el("p", { class: "success" }, [
@@ -712,13 +720,24 @@
       }
     } else {
       card.appendChild(el("p", { class: "success", text: `Reviewed by ${heat.reviewed_by} at ${heat.reviewed_at}. Locked from further edits.` }));
-      card.appendChild(renderIssuePanel(doc, heat));
+      // The backend rejects issuance from a heat with an open blocking
+      // flag regardless (main.py's issue_credential) -- this just
+      // avoids inviting an action that would only come back as a 409.
+      card.appendChild(hasBlockingFlag ? renderIssuanceBlockedNotice() : renderIssuePanel(doc, heat));
     }
 
     card.appendChild(statusEl);
     const historyTable = renderCorrectionHistory(trail);
     if (historyTable) card.appendChild(historyTable);
     return card;
+  }
+
+  function renderIssuanceBlockedNotice() {
+    return el("p", { class: "error", style: "margin-top: 1rem" }, [
+      document.createTextNode(
+        "A credential can't be issued while an open blocking issue (e.g. an unresolved compliance violation) remains on this heat — resolve it above first."
+      ),
+    ]);
   }
 
   function renderIssuePanel(doc, heat) {
