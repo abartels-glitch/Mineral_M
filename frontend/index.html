@@ -515,6 +515,15 @@
             const body = {
               heat_id: heatIdInput.value || null,
               alloy_composition: Object.keys(compositionEditor.getValue()).length ? compositionEditor.getValue() : null,
+              // Carried forward as-is: this form has no test_results editor
+              // yet, so there's nothing here for a reviewer to have edited.
+              // Omitting this key entirely used to mean the request body
+              // defaulted it to null, silently wiping out any existing
+              // test_results on every single /review submission regardless
+              // of intent -- the same silent-data-loss shape as this
+              // session's earlier flag-drop and concurrency fixes, just on
+              // a field with no UI representation to notice it happening.
+              test_results: heat.test_results || null,
               mass_kg: massInput.value ? parseFloat(massInput.value) : null,
               segregation_attested: segAttested.checked,
               segregation_attested_by: segBy.value || null,
