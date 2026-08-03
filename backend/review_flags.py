@@ -12,10 +12,14 @@ Two sources produce flags, and every flag downstream carries which one:
     thought, so extraction-time flagging and the compliance engine
     never disagree about what counts as covered.
 
-Severity is derived from issue_type, not set by callers: only a
-compliance_violation is `blocking` (a real, deterministic policy hit),
-everything else is `needs_review` (worth a human's eyes, not a known
-verdict).
+Severity is derived from issue_type, not set by callers: `blocking` is
+for compliance_violation (a real, deterministic policy hit) and
+extraction_unavailable (the AI extraction pipeline genuinely failed —
+not merely low confidence, essentially no real read of the document
+happened, so it deserves the same "can't skip past this" weight as a
+known policy violation, not the routine needs_review scalar of an
+ordinary hedged/ambiguous field). Everything else is `needs_review`
+(worth a human's eyes, not a known verdict).
 
 A flag also carries a resolution `status`. Once a human corrects the
 field a flag concerns (main.py's field-correction endpoint), the flag
@@ -45,6 +49,7 @@ IssueType = Literal[
     "inconsistent_data",
     "compliance_violation",
     "low_confidence_extraction",
+    "extraction_unavailable",
 ]
 Source = Literal["extraction", "compliance_engine"]
 Severity = Literal["blocking", "needs_review"]
@@ -56,12 +61,13 @@ ISSUE_TYPES: tuple[str, ...] = (
     "inconsistent_data",
     "compliance_violation",
     "low_confidence_extraction",
+    "extraction_unavailable",
 )
 
 # Ordering for UI/display sort — blocking first.
 SEVERITY_ORDER = {"blocking": 0, "needs_review": 1}
 
-_BLOCKING_ISSUE_TYPES = {"compliance_violation"}
+_BLOCKING_ISSUE_TYPES = {"compliance_violation", "extraction_unavailable"}
 
 
 class Flag(BaseModel):

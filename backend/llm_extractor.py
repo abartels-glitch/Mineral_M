@@ -8,12 +8,31 @@ results, and a table of blended feedstock sub-lots with their own
 origin/confidence. Uses forced tool use for reliable structured output.
 
 Falls back to the regex extractor whenever `ANTHROPIC_API_KEY` is unset
-or the API call fails for any reason (network, auth, rate limit,
-malformed response) — uploads should never break because an external
+or the API call fails — uploads should never break because an external
 API had a bad moment, and this keeps the test suite offline and free.
 The fallback can only ever produce one heat with no composition/sub-lot
 data — it's wrapped as explicitly flagged for review, not silently
 passed off as a clean extraction.
+
+Failure taxonomy (see _classify_failure): every genuine API-failure
+fallback (not the benign "no key configured" case) is classified into
+exactly one of "transient" (rate limit, 5xx/529, timeout, connection —
+the anthropic SDK's own client already retries these internally, so
+seeing one here at all means its retry budget is already exhausted),
+"permanent" (auth, bad request, not found, request-too-large,
+unprocessable-entity — the SDK correctly never retries these itself,
+since retrying an invalid request or a revoked key can't ever succeed),
+or "malformed" (the API responded, but the response couldn't be turned
+into usable structured data — retried once here, immediately, no
+backoff, since model output isn't perfectly deterministic). Whichever
+one it is, the resulting heat is flagged `extraction_unavailable`
+(blocking severity — this is not the same thing as an ordinary
+low-confidence read; essentially no real extraction happened) rather
+than silently reading as a routine lower-confidence result, and the
+caller (main.py's upload_document) records the category in the
+document's audit trail so "how many documents were degraded by
+permanent-config failures this week" is a direct query, not a
+log-grep exercise.
 """
 import logging
 import os
@@ -24,6 +43,21 @@ import extractor
 import review_flags
 
 logger = logging.getLogger(__name__)
+
+# A second attempt is only ever taken for a "malformed" classification
+# (see _classify_failure) -- a transient failure already exhausted the
+# SDK's own internal retry budget by the time we see it, and retrying a
+# permanent failure (bad key, bad request) can't ever succeed.
+MAX_MALFORMED_RESPONSE_ATTEMPTS = 2
+
+
+class MalformedResponseError(Exception):
+    """The API responded successfully (a real 200), but its content
+    couldn't be turned into usable structured data -- no tool_use block,
+    or the tool_use input didn't match what upload_document expects.
+    Distinct from every anthropic.APIError subclass: those all mean the
+    request itself failed at the transport/API level; this means it
+    succeeded and our own parsing is what failed."""
 
 MODEL = "claude-haiku-4-5-20251001"
 
@@ -197,14 +231,43 @@ SYSTEM_PROMPT = (
     "origin is both HIGH confidence and a compliance_violation flag at the same time."
 )
 
-RETRYABLE_ERRORS = (anthropic.APIError, RuntimeError, KeyError, ValueError, TypeError)
+# Statuses the anthropic SDK's own internal retry logic already retries
+# (its _should_retry: 408/409 timeouts, 429 rate limits, any 5xx) --
+# matched here by status code rather than by hardcoding exception class
+# names, so this can't silently go stale if Anthropic adds a new status
+# code or a new named subclass for one that's currently generic. Seeing
+# one of these at all means the SDK's own retry budget is already
+# exhausted for this request.
+_TRANSIENT_STATUS_CODES_MIN = 500
+
+
+def _is_transient_status_error(exc: "anthropic.APIStatusError") -> bool:
+    return exc.status_code in (408, 409, 429) or exc.status_code >= _TRANSIENT_STATUS_CODES_MIN
+
+
+def _classify_failure(exc: Exception) -> str:
+    """One of "transient", "permanent", "malformed" — see the module
+    docstring's failure-taxonomy note. Anything neither an
+    APIConnectionError nor an APIStatusError (including a totally
+    unanticipated exception type) defaults to "malformed": a single
+    extra attempt is cheap insurance, and assuming "permanent" for an
+    error this code doesn't recognize would be the wrong default —
+    "permanent" specifically means "retrying this exact request is
+    known to be futile," which isn't a safe assumption for the unknown."""
+    if isinstance(exc, anthropic.APIConnectionError):  # covers APITimeoutError, a subclass
+        return "transient"
+    if isinstance(exc, anthropic.APIStatusError):
+        return "transient" if _is_transient_status_error(exc) else "permanent"
+    return "malformed"
 
 
 def _call_llm(raw_text: str) -> dict:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set")
-    client = anthropic.Anthropic(api_key=api_key)
+    # max_retries/timeout made explicit rather than relying on the SDK's
+    # defaults unstated — both already matched the SDK's own defaults at
+    # the time this was written, but pinning them here is a deliberate,
+    # documented choice rather than an accident of whatever the SDK
+    # happens to default to on a future version bump.
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], max_retries=2, timeout=60.0)
     response = client.messages.create(
         model=MODEL,
         max_tokens=4096,
@@ -225,10 +288,10 @@ def _call_llm(raw_text: str) -> dict:
     for block in response.content:
         if block.type == "tool_use":
             return block.input
-    raise RuntimeError("model response had no tool_use block")
+    raise MalformedResponseError("model response had no tool_use block")
 
 
-def _regex_fallback(raw_text: str) -> dict:
+def _regex_fallback(raw_text: str, failure: dict | None = None) -> dict:
     flat = {f["field_name"]: f["field_value"] for f in extractor.extract_fields(raw_text)}
 
     sublots = []
@@ -250,6 +313,35 @@ def _regex_fallback(raw_text: str) -> dict:
         except ValueError:
             mass_kg = None
 
+    if failure is None:
+        # Benign: no API key configured at all (expected in dev/test),
+        # not a failed attempt -- stays exactly as before this change.
+        flag = review_flags.make_flag(
+            "low_confidence_extraction",
+            "regex fallback — composition and sub-lot data not parsed, needs full manual review",
+            source="extraction",
+        )
+    else:
+        category = failure["category"]
+        if category == "transient":
+            reason = (
+                "AI extraction failed after repeated attempts — the extraction service was "
+                "temporarily unavailable. Regex fallback used; composition and sub-lot data not "
+                "parsed, needs full manual review."
+            )
+        elif category == "permanent":
+            reason = (
+                "AI extraction failed due to a configuration or request problem, not a temporary "
+                "outage — this likely affects every future extraction until it's fixed. Regex "
+                "fallback used; composition and sub-lot data not parsed, needs full manual review."
+            )
+        else:
+            reason = (
+                "AI extraction returned an unusable response — regex fallback used; composition "
+                "and sub-lot data not parsed, needs full manual review."
+            )
+        flag = review_flags.make_flag("extraction_unavailable", reason, source="extraction")
+
     heat = {
         "heat_id": flat.get("heat_number"),
         "alloy_composition": None,
@@ -260,21 +352,22 @@ def _regex_fallback(raw_text: str) -> dict:
         "segregation_note": None,
         "mass_kg": mass_kg,
         "confidence": 0.5 if flat.get("heat_number") else 0.0,
-        "flags": [
-            review_flags.make_flag(
-                "low_confidence_extraction",
-                "regex fallback — composition and sub-lot data not parsed, needs full manual review",
-                source="extraction",
-            ).model_dump()
-        ],
+        "flags": [flag.model_dump()],
         "source": "regex",
     }
-    return {
+    result = {
         "certificate_id": None,
         "supplier_id": flat.get("supplier_name"),
         "signatures": [],
         "heats": [heat],
     }
+    if failure is not None:
+        # Consumed by main.py's upload_document to write a durable,
+        # queryable audit_log entry -- category is the clean, closed-enum
+        # field to filter on; exception_class/message ride along for
+        # diagnostics only, not meant to be cross-referenced by hand.
+        result["extraction_failure"] = failure
+    return result
 
 
 def extract_structured(raw_text: str) -> dict:
@@ -284,22 +377,49 @@ def extract_structured(raw_text: str) -> dict:
     actually produced it, and a `flags` list of structured review_flags.Flag
     dicts (source='extraction') built from the model's raw issue_type/
     field_name/human_readable_reason entries — severity is derived here,
-    not trusted to the model, so it's always consistent with issue_type."""
-    try:
-        result = _call_llm(raw_text)
-        for heat in result["heats"]:
-            heat["source"] = "llm"
-            raw_flags = heat.pop("flags", []) or []
-            heat["flags"] = [
-                review_flags.make_flag(
-                    issue_type=f["issue_type"],
-                    human_readable_reason=f["human_readable_reason"],
-                    source="extraction",
-                    field_name=f.get("field_name"),
-                ).model_dump()
-                for f in raw_flags
-            ]
-        return result
-    except RETRYABLE_ERRORS as exc:
-        logger.warning("LLM extraction failed (%s), falling back to regex extractor", exc)
+    not trusted to the model, so it's always consistent with issue_type.
+
+    A genuine API failure (as opposed to no key being configured at all)
+    additionally carries a top-level `extraction_failure` key — see
+    _regex_fallback and the module docstring's failure taxonomy."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
         return _regex_fallback(raw_text)
+
+    last_exc: Exception | None = None
+    category = "malformed"
+    for attempt in range(MAX_MALFORMED_RESPONSE_ATTEMPTS):
+        try:
+            result = _call_llm(raw_text)
+            for heat in result["heats"]:
+                heat["source"] = "llm"
+                raw_flags = heat.pop("flags", []) or []
+                heat["flags"] = [
+                    review_flags.make_flag(
+                        issue_type=f["issue_type"],
+                        human_readable_reason=f["human_readable_reason"],
+                        source="extraction",
+                        field_name=f.get("field_name"),
+                    ).model_dump()
+                    for f in raw_flags
+                ]
+            return result
+        except Exception as exc:  # classified immediately below via _classify_failure, never swallowed unclassified
+            last_exc = exc
+            category = _classify_failure(exc)
+            if category == "malformed" and attempt < MAX_MALFORMED_RESPONSE_ATTEMPTS - 1:
+                logger.warning("LLM extraction returned a malformed response (%s), retrying once immediately", exc)
+                continue
+            break
+
+    logger.warning(
+        "LLM extraction failed (%s: %s), category=%s — falling back to regex extractor",
+        type(last_exc).__name__, last_exc, category,
+    )
+    return _regex_fallback(
+        raw_text,
+        failure={
+            "category": category,
+            "exception_class": type(last_exc).__name__,
+            "exception_message": str(last_exc),
+        },
+    )

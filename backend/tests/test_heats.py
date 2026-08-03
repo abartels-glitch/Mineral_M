@@ -6,6 +6,7 @@ llm_extractor.extract_structured directly to exercise the multi-heat/
 sub-lot path without a live network call.
 """
 import hashlib
+import json
 import sqlite3
 
 import pytest
@@ -193,6 +194,81 @@ def test_upload_with_mocked_multi_heat_flagged_sublot(client, conn, monkeypatch)
     china_sublot = next(s for s in heat2["sublots"] if s["origin_country"] == "China")
     assert china_sublot["flagged"] is True
     assert china_sublot["flags"][0]["issue_type"] == "compliance_violation"
+
+
+def test_upload_records_extraction_degraded_audit_entry_with_category(client, conn, monkeypatch):
+    """upload_document must write a durable, queryable audit_log entry
+    (entity_type='document') carrying the failure category, not just a
+    log line -- distinct from the heat-level extraction_unavailable flag
+    a reviewer sees in the UI. "How many documents were degraded by
+    permanent-config failures this week" must be a direct filter on
+    category, not a matter of cross-referencing exception class names."""
+
+    def fake_extract_structured(raw_text):
+        return {
+            "certificate_id": None,
+            "supplier_id": "Rio Grande Magnetics, LLC",
+            "signatures": [],
+            "heats": [
+                {
+                    "heat_id": None,
+                    "alloy_composition": None,
+                    "test_results": None,
+                    "nonconformance_refs": [],
+                    "feedstock_sublots": [],
+                    "segregation_attested": False,
+                    "segregation_note": None,
+                    "mass_kg": None,
+                    "confidence": 0.0,
+                    "flags": [
+                        review_flags.make_flag(
+                            "extraction_unavailable",
+                            "AI extraction failed due to a configuration or request problem...",
+                            source="extraction",
+                        ).model_dump()
+                    ],
+                    "source": "regex",
+                }
+            ],
+            "extraction_failure": {
+                "category": "permanent",
+                "exception_class": "AuthenticationError",
+                "exception_message": "invalid x-api-key",
+            },
+        }
+
+    monkeypatch.setattr(llm_extractor, "extract_structured", fake_extract_structured)
+    _login_org_user(client, conn)
+    upload = _upload(client).json()
+    doc_id = upload["id"]
+
+    heat = upload["heats"][0]
+    assert heat["flags"][0]["issue_type"] == "extraction_unavailable"
+    assert heat["flags"][0]["severity"] == "blocking"
+
+    rows = conn.execute(
+        "SELECT detail_json FROM audit_log WHERE entity_type = 'document' AND entity_id = ? AND action = 'extraction_degraded'",
+        (doc_id,),
+    ).fetchall()
+    assert len(rows) == 1
+    detail = json.loads(rows[0]["detail_json"])
+    assert detail["category"] == "permanent"
+    assert detail["exception_class"] == "AuthenticationError"
+
+
+def test_upload_does_not_record_extraction_degraded_entry_on_clean_or_benign_fallback(client, conn):
+    """No audit noise for the two non-failure cases: a genuinely clean
+    LLM extraction, or the benign no-API-key-configured fallback (regex
+    path, but not a failed attempt)."""
+    _login_org_user(client, conn)
+    upload = _upload(client).json()  # regex fallback, ANTHROPIC_API_KEY unset in this suite's conn fixture
+    doc_id = upload["id"]
+
+    rows = conn.execute(
+        "SELECT id FROM audit_log WHERE entity_type = 'document' AND entity_id = ? AND action = 'extraction_degraded'",
+        (doc_id,),
+    ).fetchall()
+    assert rows == []
 
 
 def test_review_heat_locks_after_review(client, conn):

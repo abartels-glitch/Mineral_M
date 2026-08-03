@@ -627,6 +627,16 @@ async def upload_document(
             )
     conn.commit()
     audit.record(conn, "document", document_id, "extracted", actor="system")
+    extraction_failure = structured.get("extraction_failure")
+    if extraction_failure is not None:
+        # Durable, queryable record of the degradation -- category
+        # ("transient"/"permanent"/"malformed", see llm_extractor.py) is
+        # the field to filter on directly; exception_class/message ride
+        # along for diagnostics, not meant to be cross-referenced by
+        # hand. Distinct from the heat-level extraction_unavailable
+        # flag (which a reviewer sees in the UI) -- this is the
+        # operational/audit-trail side of the same event.
+        audit.record(conn, "document", document_id, "extraction_degraded", actor="system", detail=extraction_failure)
 
     return _document_upload_response(conn, document_id, file.filename, document_type, structured)
 
