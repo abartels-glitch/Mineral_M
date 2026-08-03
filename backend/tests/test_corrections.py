@@ -207,6 +207,12 @@ def test_correct_heat_field_resolves_matching_flag(client, conn, monkeypatch):
 
 
 def test_correct_heat_field_rejects_unknown_field(client, conn):
+    # nonconformance_refs (not alloy_composition/test_results, which are
+    # correctable -- see test_corrections_object_fields.py) stays off the
+    # allowlist: it's a list of strings (llm_extractor.HEAT_SCHEMA), not a
+    # scalar or the flat/one-level-nested dict shapes this pass built
+    # editors for. /review's full-replace form remains the only way to
+    # change it until a list-shaped editor exists.
     _login_org_user(client, conn)
     upload = _upload(client).json()
     doc_id = upload["id"]
@@ -214,7 +220,7 @@ def test_correct_heat_field_rejects_unknown_field(client, conn):
 
     resp = client.post(
         f"/documents/{doc_id}/heats/{heat_id}/correct",
-        json={"target": "heat", "field_name": "alloy_composition", "corrected_value": "{}"},
+        json={"target": "heat", "field_name": "nonconformance_refs", "corrected_value": "[]"},
     )
     assert resp.status_code == 400
 

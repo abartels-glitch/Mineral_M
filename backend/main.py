@@ -104,18 +104,41 @@ def _evaluate_sublot_flag(sublot: dict, sublot_id: Optional[str] = None) -> list
     return []
 
 
-# Field-level correction allowlist: field_name -> (column, python type).
-# Deliberately scalar-only — alloy_composition/test_results/nonconformance_refs
-# stay on the full-replace review form (HeatReviewRequest); those are
-# structured/nested and the LLM's flags never target them by field_name
-# anyway (see llm_extractor.FLAG_SCHEMA's field_name description).
-_HEAT_CORRECTABLE_FIELDS: dict[str, type] = {"heat_id": str, "mass_kg": float}
-_SUBLOT_CORRECTABLE_FIELDS: dict[str, type] = {
-    "sublot_id": str,
-    "blend_pct": float,
-    "origin_country": str,
-    "origin_confidence": str,
-    "notes": str,
+# Field-level correction allowlist: field_name (the API/HeatOut attribute
+# name a flag's field_name and the frontend both use) -> (column_name,
+# python_type). Column name is spelled out separately from field_name
+# because it isn't always the same string: alloy_composition/test_results
+# are stored as alloy_composition_json/test_results_json (see db.py's
+# schema) — every other correctable field today happens to have identical
+# field/column names, which is why this used to be a bare field_name ->
+# type dict, but that shape can't express the _json-suffixed columns.
+#
+# alloy_composition/test_results are full-value replaces here, same as
+# every other field this dict lists. nonconformance_refs still isn't
+# included — not because nothing targets it by field_name (that's a
+# free-text string the LLM can set to anything, including this; that
+# assumption is exactly what turned out to be wrong for
+# alloy_composition/test_results before this dict grew to cover them),
+# but because it's genuinely a different shape: a list of strings
+# (llm_extractor.HEAT_SCHEMA's nonconformance_refs is `{"type": "array",
+# "items": {"type": "string"}}`), not a dict at all. Neither
+# buildKeyValueEditor's flat map nor buildTestResultsEditor's
+# name->{value,result} map fits a bare string list — it would need its
+# own add/remove-row-of-strings editor, which is out of scope for this
+# pass. /review's full-replace form remains the only way to change it
+# until that's built.
+_HEAT_CORRECTABLE_FIELDS: dict[str, tuple[str, type]] = {
+    "heat_id": ("heat_id", str),
+    "mass_kg": ("mass_kg", float),
+    "alloy_composition": ("alloy_composition_json", dict),
+    "test_results": ("test_results_json", dict),
+}
+_SUBLOT_CORRECTABLE_FIELDS: dict[str, tuple[str, type]] = {
+    "sublot_id": ("sublot_id", str),
+    "blend_pct": ("blend_pct", float),
+    "origin_country": ("origin_country", str),
+    "origin_confidence": ("origin_confidence", str),
+    "notes": ("notes", str),
 }
 
 # Bound on correct_field's compare-and-swap retry loop (see its use
@@ -127,7 +150,11 @@ _SUBLOT_CORRECTABLE_FIELDS: dict[str, type] = {
 _CAS_MAX_RETRIES = 5
 
 
-def _coerce_corrected_value(raw: Optional[str], field_type: type):
+def _coerce_corrected_value(raw: Optional[str | dict], field_type: type):
+    if field_type is dict:
+        if raw is not None and not isinstance(raw, dict):
+            raise HTTPException(400, "corrected_value must be an object for this field")
+        return raw
     if raw is None or raw == "":
         return None
     if field_type is float:
@@ -818,7 +845,13 @@ def correct_field(
     if body.target == "heat":
         if body.field_name not in _HEAT_CORRECTABLE_FIELDS:
             raise HTTPException(400, f"heat field '{body.field_name}' cannot be corrected here")
-        corrected_value = _coerce_corrected_value(body.corrected_value, _HEAT_CORRECTABLE_FIELDS[body.field_name])
+        column_name, field_type = _HEAT_CORRECTABLE_FIELDS[body.field_name]
+        corrected_value = _coerce_corrected_value(body.corrected_value, field_type)
+        # dict-typed fields (alloy_composition/test_results) are stored
+        # as a _json-suffixed TEXT column — everything from here down
+        # binds/reads bound_value, never corrected_value directly, so a
+        # scalar field's bound_value is just corrected_value unchanged.
+        bound_value = json.dumps(corrected_value) if field_type is dict else corrected_value
 
         # Compare-and-swap on flags_json, retried on conflict rather than
         # surfaced as an error: two /correct calls targeting DIFFERENT
@@ -832,7 +865,8 @@ def correct_field(
         # seeing an error for something that wasn't their fault.
         for _attempt in range(_CAS_MAX_RETRIES):
             current = conn.execute("SELECT * FROM document_heats WHERE id = ?", (heat_id,)).fetchone()
-            previous_value = current[body.field_name]
+            raw_previous = current[column_name]
+            previous_value = json.loads(raw_previous) if field_type is dict and raw_previous is not None else raw_previous
             heat_flags = json.loads(current["flags_json"])
             _resolve_open_flags_for_field(heat_flags, body.field_name, actor, corrected_at)
             sibling_sublot_rows = conn.execute(
@@ -845,11 +879,11 @@ def correct_field(
             cas = conn.execute(
                 f"""
                 UPDATE document_heats
-                SET {body.field_name} = ?, source = 'human', flags_json = ?, flagged_for_review = ?
+                SET {column_name} = ?, source = 'human', flags_json = ?, flagged_for_review = ?
                 WHERE id = ? AND flags_json = ?
                 """,
                 (
-                    corrected_value, json.dumps(heat_flags), 1 if heat_still_flagged else 0,
+                    bound_value, json.dumps(heat_flags), 1 if heat_still_flagged else 0,
                     heat_id, current["flags_json"],
                 ),
             )
@@ -863,7 +897,8 @@ def correct_field(
             raise HTTPException(400, "sublot_id is required when target is 'sublot'")
         if body.field_name not in _SUBLOT_CORRECTABLE_FIELDS:
             raise HTTPException(400, f"sub-lot field '{body.field_name}' cannot be corrected here")
-        corrected_value = _coerce_corrected_value(body.corrected_value, _SUBLOT_CORRECTABLE_FIELDS[body.field_name])
+        sublot_column_name, sublot_field_type = _SUBLOT_CORRECTABLE_FIELDS[body.field_name]
+        corrected_value = _coerce_corrected_value(body.corrected_value, sublot_field_type)
 
         # Same compare-and-swap-with-retry shape as the heat branch
         # above, applied to both flags_json copies this branch writes:
@@ -878,7 +913,7 @@ def correct_field(
             ).fetchone()
             if sublot is None:
                 raise HTTPException(404, "sub-lot not found")
-            previous_value = sublot[body.field_name]
+            previous_value = sublot[sublot_column_name]
 
             sublot_flags = json.loads(sublot["flags_json"])
             _resolve_open_flags_for_field(sublot_flags, body.field_name, actor, corrected_at)
@@ -889,13 +924,13 @@ def correct_field(
             # compliance_violation flag live, rather than just clearing
             # whatever was flagged before.
             updated_sublot = dict(sublot)
-            updated_sublot[body.field_name] = corrected_value
+            updated_sublot[sublot_column_name] = corrected_value
             fresh_flags = _evaluate_sublot_flag(updated_sublot, sublot_id=body.sublot_id)
             _append_fresh_flags(sublot_flags, fresh_flags, match_sublot=False)
             sublot_still_flagged = _any_open(sublot_flags)
 
             sublot_cas = conn.execute(
-                f"UPDATE heat_sublots SET {body.field_name} = ?, flags_json = ?, flagged = ? WHERE id = ? AND flags_json = ?",
+                f"UPDATE heat_sublots SET {sublot_column_name} = ?, flags_json = ?, flagged = ? WHERE id = ? AND flags_json = ?",
                 (
                     corrected_value, json.dumps(sublot_flags), 1 if sublot_still_flagged else 0,
                     body.sublot_id, sublot["flags_json"],

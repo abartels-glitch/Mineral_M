@@ -1,10 +1,12 @@
 // Regression coverage for renderCorrectionPanel (index.html): a flagged
-// field whose current value is an object (e.g. alloy_composition) must
-// render as a real structured representation, never a stringified
-// "[object Object]" blob — and since the backend's /correct endpoint only
-// accepts scalar corrections for heat-level fields today (see main.py's
-// _HEAT_CORRECTABLE_FIELDS), an object-shaped field must not offer a
-// "Save correction" button that would just 400 against the real API.
+// field whose current value is an object must render as a real
+// structured representation, never a stringified "[object Object]"
+// blob. alloy_composition/test_results are now genuinely correctable in
+// place (main.py's _HEAT_CORRECTABLE_FIELDS) and get a real editable
+// sub-form with a working "Save correction" button; any other
+// object/array-shaped field (nothing allowlisted for it on the backend)
+// still gets the original locked read-only view + redirect note instead
+// of a save button that would just 400.
 //
 // Loads app.js's shared helpers plus index.html's own inline script into a
 // real jsdom window and calls renderCorrectionPanel directly — no server,
@@ -51,7 +53,12 @@ function loadPageFunctions(htmlFilename) {
   return window;
 }
 
-test("object-shaped flagged field (alloy_composition) renders structured, not '[object Object]', and offers no broken save button", () => {
+async function flushMicrotasks() {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+test("alloy_composition flag renders structured, not '[object Object]', with a real editable sub-form", () => {
   const window = loadPageFunctions("index.html");
   const heat = {
     id: "heat-1",
@@ -76,14 +83,155 @@ test("object-shaped flagged field (alloy_composition) renders structured, not '[
   assert.ok(!html.includes("[object Object]"), `correction panel rendered a stringified object:\n${html}`);
 
   const inputValues = [...container.querySelectorAll("input")].map((i) => i.value);
-  assert.ok(inputValues.includes("29.5"), "expected Nd's value 29.5 to render in a real input");
+  assert.ok(inputValues.includes("29.5"), "expected Nd's value 29.5 to render in a real, editable input");
   assert.ok(inputValues.includes("Fe"), "expected the composition's element keys to render");
 
-  assert.ok(
-    !html.includes("Save correction"),
-    "object-shaped field must not offer a save button — /correct can't actually save it today"
-  );
-  assert.ok(html.includes("isn't available yet"), "expected the redirect-to-full-review note");
+  assert.ok(html.includes("Save correction"), "alloy_composition is correctable now -- expected a working save button");
+  assert.ok(!html.includes("isn't available yet"), "should no longer show the redirect-to-full-review note");
+});
+
+test("saving an alloy_composition correction POSTs the edited object, not a stringified value", async () => {
+  const window = loadPageFunctions("index.html");
+  const calls = [];
+  window.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+
+  const heat = {
+    id: "heat-1",
+    alloy_composition: { Nd: 29.5, Fe: 68.2 },
+    sublots: [],
+    flags: [
+      {
+        issue_type: "ambiguous_field",
+        field_name: "alloy_composition",
+        severity: "needs_review",
+        human_readable_reason: "Ambiguous.",
+        source: "extraction",
+        status: "open",
+      },
+    ],
+  };
+  const statusEl = window.document.createElement("p");
+  const container = window.renderCorrectionPanel({ id: "doc-1" }, heat, statusEl, async () => {});
+
+  // Edit Fe's value in place via the real input, then click "Save correction".
+  const feInput = [...container.querySelectorAll("input")].find((i) => i.value === "68.2");
+  feInput.value = "68.5";
+  const saveBtn = [...container.querySelectorAll("button")].find((b) => b.textContent === "Save correction");
+  saveBtn.click();
+  await flushMicrotasks();
+
+  assert.equal(calls.length, 1, "expected exactly one /correct request");
+  const body = JSON.parse(calls[0].options.body);
+  assert.equal(body.target, "heat");
+  assert.equal(body.field_name, "alloy_composition");
+  assert.deepEqual(body.corrected_value, { Nd: 29.5, Fe: 68.5 }, "expected a real object, not a stringified one");
+});
+
+test("test_results flag renders a real editable sub-form and saves a well-shaped object", async () => {
+  const window = loadPageFunctions("index.html");
+  const calls = [];
+  window.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+
+  const heat = {
+    id: "heat-1",
+    test_results: { Br_kG: { value: 13.2, result: "pass" } },
+    sublots: [],
+    flags: [
+      {
+        issue_type: "missing_field",
+        field_name: "test_results",
+        severity: "needs_review",
+        human_readable_reason: "Only one test result reported.",
+        source: "extraction",
+        status: "open",
+      },
+    ],
+  };
+  const statusEl = window.document.createElement("p");
+  const container = window.renderCorrectionPanel({ id: "doc-1" }, heat, statusEl, async () => {});
+
+  const html = container.innerHTML;
+  assert.ok(!html.includes("[object Object]"));
+  assert.ok(html.includes("Save correction"));
+  const inputValues = [...container.querySelectorAll("input")].map((i) => i.value);
+  assert.ok(inputValues.includes("Br_kG"));
+  assert.ok(inputValues.includes("13.2"));
+  const select = container.querySelector("select");
+  assert.equal(select.value, "pass");
+
+  const saveBtn = [...container.querySelectorAll("button")].find((b) => b.textContent === "Save correction");
+  saveBtn.click();
+  await flushMicrotasks();
+
+  assert.equal(calls.length, 1);
+  const body = JSON.parse(calls[0].options.body);
+  assert.equal(body.field_name, "test_results");
+  assert.deepEqual(body.corrected_value, { Br_kG: { value: 13.2, result: "pass" } });
+});
+
+test("test_results row with an unexpected shape renders read-only instead of guessing or crashing", () => {
+  const window = loadPageFunctions("index.html");
+  const heat = {
+    id: "heat-1",
+    test_results: { Br_kG: 13.2 }, // malformed: not {value, result}
+    sublots: [],
+    flags: [
+      {
+        issue_type: "missing_field",
+        field_name: "test_results",
+        severity: "needs_review",
+        human_readable_reason: "Malformed legacy row.",
+        source: "extraction",
+        status: "open",
+      },
+    ],
+  };
+  const statusEl = window.document.createElement("p");
+  const container = window.renderCorrectionPanel({ id: "doc-1" }, heat, statusEl, async () => {});
+
+  assert.ok(!container.innerHTML.includes("[object Object]"));
+  assert.ok(container.innerHTML.includes("13.2"), "expected the malformed row's raw value to still be visible");
+  const keyInput = [...container.querySelectorAll("input")].find((i) => i.value === "Br_kG");
+  assert.ok(keyInput.disabled, "malformed row should render read-only, not an editable guess");
+});
+
+test("a still-unsupported list field (nonconformance_refs) keeps the read-only redirect fallback", () => {
+  // nonconformance_refs is a list of strings (llm_extractor.HEAT_SCHEMA),
+  // not a dict -- but typeof [] === "object" in JS, so it still hits the
+  // same branch as alloy_composition/test_results here. There's no
+  // allowlisted backend column for it (main.py's _HEAT_CORRECTABLE_FIELDS
+  // has no list-shaped entries -- neither editor built this pass fits a
+  // bare string list), so it must keep the read-only fallback rather than
+  // a save button that would just 400.
+  const window = loadPageFunctions("index.html");
+  const heat = {
+    id: "heat-1",
+    nonconformance_refs: ["NCR-1"],
+    sublots: [],
+    flags: [
+      {
+        issue_type: "ambiguous_field",
+        field_name: "nonconformance_refs",
+        severity: "needs_review",
+        human_readable_reason: "Ambiguous nonconformance reference.",
+        source: "extraction",
+        status: "open",
+      },
+    ],
+  };
+  const statusEl = window.document.createElement("p");
+  const container = window.renderCorrectionPanel({ id: "doc-1" }, heat, statusEl, async () => {});
+
+  assert.ok(container);
+  assert.ok(!container.innerHTML.includes("[object Object]"));
+  assert.ok(!container.innerHTML.includes("Save correction"), "no allowlisted column for this field -- must not offer a save button");
+  assert.ok(container.innerHTML.includes("isn't available yet"));
 });
 
 test("scalar flagged field (heat_id) still renders a normal editable input and a working save button", () => {

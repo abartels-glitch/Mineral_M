@@ -198,16 +198,57 @@
       const currentValue = target === "heat" ? heat[flag.field_name] : sublot[flag.field_name];
       const label = target === "sublot" ? `Sub-lot ${sublot.sublot_id || sublot.id.slice(0, 6)} · ${flag.field_name}` : flag.field_name;
 
-      // Structured (object-shaped) fields — alloy_composition, test_results
-      // — don't go through the text-input/quick-save path below: the
-      // backend's /correct endpoint only accepts scalar corrections for
-      // heat-level fields (see main.py's _HEAT_CORRECTABLE_FIELDS), so
-      // there's no working save call to wire up here yet. Rendered as a
-      // real structured (read-only) view of the actual value — reusing
-      // the same key/value editor the Found section uses, just locked —
-      // instead of the raw value getting silently stringified into a
-      // plain input, which used to render as literal "[object Object]".
+      // Structured (object-shaped) fields. alloy_composition/test_results
+      // are the two the backend actually supports correcting in place
+      // (main.py's _HEAT_CORRECTABLE_FIELDS) — real editable sub-forms,
+      // reusing the Found section's flat key/value editor for the former
+      // and a purpose-built one for the latter's one-level-deeper shape.
+      // Anything else object/array-shaped (e.g. nonconformance_refs, or
+      // an unexpected field_name) has no allowlisted column to save
+      // against, so it keeps the original locked read-only view + note
+      // instead of offering a save button that would just 400 — this is
+      // also what used to render the raw value as literal
+      // "[object Object]" before that display-layer fix.
       if (currentValue !== null && typeof currentValue === "object") {
+        if (flag.field_name === "alloy_composition" || flag.field_name === "test_results") {
+          const editor =
+            flag.field_name === "alloy_composition"
+              ? buildKeyValueEditor(currentValue, false)
+              : buildTestResultsEditor(currentValue, false);
+          const saveBtn = el("button", {
+            class: "icon-btn",
+            type: "button",
+            text: "Save correction",
+            onclick: async () => {
+              statusEl.textContent = "";
+              try {
+                await apiFetch(`/documents/${doc.id}/heats/${heat.id}/correct`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    target,
+                    sublot_id: target === "sublot" ? sublot.id : null,
+                    field_name: flag.field_name,
+                    corrected_value: editor.getValue(),
+                  }),
+                });
+                await onSaved();
+              } catch (err) {
+                statusEl.textContent = err.message;
+              }
+            },
+          });
+          container.appendChild(
+            el("div", { class: "correction-row" }, [
+              el("span", { class: "correction-label", text: label }),
+              el("span", { class: "muted", text: flag.human_readable_reason }),
+            ])
+          );
+          container.appendChild(editor.container);
+          container.appendChild(saveBtn);
+          continue;
+        }
+
         container.appendChild(
           el("div", { class: "correction-row" }, [
             el("span", { class: "correction-label", text: label }),
@@ -321,6 +362,88 @@
           if (!key) continue;
           const num = parseFloat(inputs[1].value);
           result[key] = Number.isNaN(num) ? inputs[1].value : num;
+        }
+        return result;
+      },
+    };
+  }
+
+  // Sibling to buildKeyValueEditor, for test_results' one-level-deeper
+  // shape (test_name -> {value, result}) rather than alloy_composition's
+  // flat element -> number map — the two fields are consistently but
+  // differently shaped everywhere they're constructed (llm_extractor's
+  // schema, every fixture, seed.py), so one editor can't cover both.
+  //
+  // Nothing validates this shape on the way in (HeatOut.test_results is
+  // a bare dict, no sub-schema), so a per-entry value that isn't a
+  // {value, result}-shaped object renders as a locked, read-only raw
+  // row instead of guessing at a coercion or silently dropping it.
+  function buildTestResultsEditor(initialDict, locked) {
+    const container = el("div", { class: "kv-editor" });
+    const rows = [];
+    let addBtn = null;
+
+    function isWellShaped(entry) {
+      return entry !== null && typeof entry === "object" && !Array.isArray(entry);
+    }
+
+    function addRow(name, entry) {
+      if (entry !== undefined && entry !== null && !isWellShaped(entry)) {
+        const row = el("div", { class: "kv-row" }, [
+          el("input", { type: "text", class: "kv-key", value: name || "", disabled: "disabled" }),
+          el("span", { class: "muted", text: JSON.stringify(entry) }),
+        ]);
+        rows.push({ row, malformed: true, name, raw: entry });
+        if (addBtn) container.insertBefore(row, addBtn);
+        else container.appendChild(row);
+        return;
+      }
+
+      const value = entry && entry.value !== undefined && entry.value !== null ? entry.value : "";
+      const result = entry && entry.result ? entry.result : "";
+      const nameInput = el("input", { type: "text", class: "kv-key", value: name || "", placeholder: "test name", disabled: locked ? "disabled" : null });
+      const valueInput = el("input", { type: "text", value: String(value), placeholder: "value", disabled: locked ? "disabled" : null });
+      const resultSelect = el("select", { disabled: locked ? "disabled" : null }, [
+        el("option", { value: "", text: "—" }),
+        el("option", { value: "pass", text: "pass" }),
+        el("option", { value: "fail", text: "fail" }),
+        el("option", { value: "marginal", text: "marginal" }),
+      ]);
+      resultSelect.value = result;
+      const children = [nameInput, valueInput, resultSelect];
+      if (!locked) {
+        children.push(
+          el("button", { class: "icon-btn", type: "button", text: "×", onclick: () => { row.remove(); rows.splice(rows.findIndex((r) => r.row === row), 1); } })
+        );
+      }
+      const row = el("div", { class: "kv-row" }, children);
+      rows.push({ row, malformed: false, nameInput, valueInput, resultSelect });
+      if (addBtn) container.insertBefore(row, addBtn);
+      else container.appendChild(row);
+    }
+
+    for (const [name, entry] of Object.entries(initialDict || {})) addRow(name, entry);
+    if (!locked) {
+      addBtn = el("button", { class: "icon-btn", type: "button", text: "+ test" });
+      addBtn.addEventListener("click", () => addRow("", { value: "", result: "" }));
+      container.appendChild(addBtn);
+    }
+
+    return {
+      container,
+      getValue() {
+        const result = {};
+        for (const r of rows) {
+          if (r.malformed) {
+            if (r.name) result[r.name] = r.raw;
+            continue;
+          }
+          const name = r.nameInput.value.trim();
+          if (!name) continue;
+          const rawValue = r.valueInput.value;
+          const num = parseFloat(rawValue);
+          const value = rawValue === "" ? null : Number.isNaN(num) ? rawValue : num;
+          result[name] = { value, result: r.resultSelect.value || null };
         }
         return result;
       },

@@ -365,6 +365,55 @@ def test_concurrent_corrections_on_different_fields_both_resolve_their_flag(clie
     assert flags_by_field == {"heat_id": "resolved", "mass_kg": "resolved"}, (
         f"one correction's flag resolution was lost to the other: {flags_by_field}"
     )
+
+
+def test_concurrent_object_and_scalar_field_corrections_both_resolve_their_flag(client, live_server):
+    """Same CAS-with-retry mechanism as the scalar-only case above, now
+    exercising one of the two object-typed fields (alloy_composition) --
+    confirms the dict-correction path added for the sub-form feature
+    reuses the existing atomicity guarantee rather than a second, weaker
+    code path, exactly as intended when it was designed."""
+    doc_id, heat_id = _upload(client, "cas-retry-object-" + str(id(client)))
+
+    seeded_flags = [
+        {
+            "issue_type": "ambiguous_field", "field_name": "alloy_composition", "severity": "needs_review",
+            "human_readable_reason": "seeded for concurrency test", "source": "extraction", "status": "open",
+        },
+        {
+            "issue_type": "missing_field", "field_name": "mass_kg", "severity": "needs_review",
+            "human_readable_reason": "seeded for concurrency test", "source": "extraction", "status": "open",
+        },
+    ]
+    conn = _db_conn(live_server)
+    conn.execute(
+        "UPDATE document_heats SET flags_json = ?, flagged_for_review = 1 WHERE id = ?",
+        (json.dumps(seeded_flags), heat_id),
+    )
+    conn.commit()
+    conn.close()
+
+    corrected_composition = {"Nd": 29.5, "Fe": 68.2, "B": 1.0}
+    results = _fire_concurrent([
+        lambda: client.post(
+            f"/documents/{doc_id}/heats/{heat_id}/correct",
+            json={"target": "heat", "field_name": "alloy_composition", "corrected_value": corrected_composition},
+        ),
+        lambda: client.post(
+            f"/documents/{doc_id}/heats/{heat_id}/correct",
+            json={"target": "heat", "field_name": "mass_kg", "corrected_value": "77.7"},
+        ),
+    ])
+    for r in results:
+        assert r.status_code == 200, r.text
+
+    heat = client.get(f"/documents/{doc_id}").json()["heats"][0]
+    assert heat["alloy_composition"] == corrected_composition
+    assert heat["mass_kg"] == 77.7
+    flags_by_field = {f["field_name"]: f["status"] for f in heat["flags"]}
+    assert flags_by_field == {"alloy_composition": "resolved", "mass_kg": "resolved"}, (
+        f"one correction's flag resolution was lost to the other: {flags_by_field}"
+    )
     assert heat["flagged_for_review"] is False
 
 

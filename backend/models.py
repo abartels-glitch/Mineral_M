@@ -112,7 +112,11 @@ class FieldCorrectionRequest(BaseModel):
     target: Literal["heat", "sublot"]
     sublot_id: Optional[str] = None
     field_name: str
-    corrected_value: Optional[str] = None
+    # str for every scalar-correctable field (heat_id, mass_kg, the
+    # sub-lot fields); dict for alloy_composition/test_results, whose
+    # correction is a full-value replace of the structured field, not a
+    # single string.
+    corrected_value: Optional[str | dict] = None
 
 
 class CredentialIssueRequest(BaseModel):
