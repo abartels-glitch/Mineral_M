@@ -60,7 +60,11 @@ def _evaluate_node(conn: sqlite3.Connection, credential_id: str) -> tuple[dict, 
             [],
         )
 
-    issuer = conn.execute("SELECT * FROM issuers WHERE id = ?", (row["issuer_id"],)).fetchone()
+    # Narrow SELECT: only public_key is used below (for signature
+    # verification). This function is reachable from the public,
+    # unauthenticated /passport/{id} and /passport/{id}/pdf endpoints, so
+    # it must never pull private_key_path into memory here.
+    issuer = conn.execute("SELECT public_key FROM issuers WHERE id = ?", (row["issuer_id"],)).fetchone()
     subject = json.loads(row["subject_json"])
     sources = json.loads(row["sources_json"])
     material_type = subject.get("material_type")

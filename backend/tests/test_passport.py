@@ -244,6 +244,36 @@ def test_swapped_document_bytes_fail_tamper_check(conn):
     assert any("modified since this credential was signed" in r for r in result["nodes"][0]["reasons"])
 
 
+def test_evaluate_node_never_fetches_private_key_path(conn):
+    """_evaluate_node is reachable from the public, unauthenticated
+    /passport/{id} and /passport/{id}/pdf endpoints and only needs
+    issuers.public_key for signature verification. Regression guard: if
+    its query is ever widened back to SELECT *, this catches it before
+    private_key_path starts getting pulled into memory on every public
+    passport lookup."""
+    issuer_id, key_path = make_issuer(conn)
+    cred_id = issue_credential(conn, issuer_id, key_path, "sintered_ndfeb_batch", US_NDFEB_SUBJECT, None, [])
+    conn.commit()
+
+    captured_issuer_columns = []
+    base_row_factory = conn.row_factory
+
+    def recording_row_factory(cursor, row):
+        cols = [d[0] for d in cursor.description]
+        if "public_key" in cols:
+            captured_issuer_columns.append(cols)
+        return base_row_factory(cursor, row)
+
+    conn.row_factory = recording_row_factory
+
+    result = passport_engine.compile_passport(conn, cred_id)
+
+    assert result["verdict"] == "pass"
+    assert captured_issuer_columns, "expected the issuers table to be queried at least once"
+    for cols in captured_issuer_columns:
+        assert "private_key_path" not in cols, f"issuer query fetched private_key_path: {cols}"
+
+
 def test_missing_document_object_fails(conn):
     issuer_id, key_path = make_issuer(conn)
     doc_id = make_document(conn, issuer_id)
