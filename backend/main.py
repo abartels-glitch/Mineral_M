@@ -62,11 +62,12 @@ def now_iso() -> str:
 
 
 def _evaluate_sublot_flag(sublot: dict, sublot_id: Optional[str] = None) -> list[dict]:
-    """Deterministic sub-lot flagging, reusing passport.py's own banned-
-    country list so extraction-time flagging and the compliance engine
-    never disagree about what counts as covered. Returns structured
-    review_flags.Flag dicts (source='compliance_engine') rather than a
-    bare reason string — same rules as before, just structured output.
+    """Deterministic sub-lot flagging, reusing passport.py's own
+    is_banned_origin so extraction-time flagging and the verification-time
+    recheck in passport.py's _evaluate_node never disagree about what
+    counts as covered. Returns structured review_flags.Flag dicts
+    (source='compliance_engine') rather than a bare reason string — same
+    rules as before, just structured output.
 
     `sublot_id` is stamped onto the flag when the caller has one (a
     persisted heat_sublots row id) — callers evaluating a not-yet-inserted
@@ -81,7 +82,7 @@ def _evaluate_sublot_flag(sublot: dict, sublot_id: Optional[str] = None) -> list
                 field_name="origin_country", sublot_id=sublot_id,
             ).model_dump()
         ]
-    if origin.lower() in passport_engine.BANNED_ORIGIN_COUNTRIES:
+    if passport_engine.is_banned_origin(origin):
         return [
             review_flags.make_flag(
                 "compliance_violation",

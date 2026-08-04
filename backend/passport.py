@@ -16,7 +16,8 @@ from crypto_utils import credential_signable_payload, verify_signature
 BANNED_ORIGIN_COUNTRIES = {
     "china",
     "people's republic of china",
-    "prc",
+    "prc",  # thinnest entry in this set: a bare 3-letter substring, kept
+            # because no realistic origin-country string collides with it
     "russia",
     "russian federation",
     "iran",
@@ -25,6 +26,47 @@ BANNED_ORIGIN_COUNTRIES = {
     "democratic people's republic of korea",
     "dprk",
 }
+
+# Taiwan's official name, "Republic of China", contains "china" as a
+# substring but is not FEOC-covered — without this carve-out, is_banned_origin
+# below would misflag legitimate Taiwan-origin material.
+_NOT_BANNED_DESPITE_SUBSTRING = (
+    "republic of china",
+    "taiwan",
+    "chinese taipei",
+)
+
+
+def _normalize_origin(origin_country: str) -> str:
+    return " ".join((origin_country or "").split()).lower()
+
+
+def is_banned_origin(origin_country: str) -> bool:
+    """True if origin_country names or contains a FEOC-covered country.
+
+    Substring, not exact-equality: origin_country is meant to name a
+    single country, but a concatenated/blended value (a botched
+    correction leaving "ChinaUnited States", or a genuine blended-origin
+    string like "60% US / 40% Russia") should still trip this — an
+    exact match only catches the field being precisely one banned name
+    and nothing else.
+
+    Shared by main.py's extraction/correction-time flagging and this
+    module's own verification-time recheck (_evaluate_node below), so
+    the two can't independently drift on what counts as covered — same
+    principle as crypto_utils.credential_signable_payload being shared
+    between issuance and verification.
+    """
+    normalized = _normalize_origin(origin_country)
+    if not normalized:
+        return False
+    if "people's republic of china" in normalized:
+        return True
+    remaining = normalized
+    for exception in _NOT_BANNED_DESPITE_SUBSTRING:
+        remaining = remaining.replace(exception, " ")
+    return any(banned in remaining for banned in BANNED_ORIGIN_COUNTRIES)
+
 
 # DFARS rare-earth scope this compliance engine actually checks — not the
 # broader "motors, batteries, ESCs" language from the pitch deck.
@@ -130,11 +172,10 @@ def _evaluate_node(conn: sqlite3.Connection, credential_id: str) -> tuple[dict, 
             reasons.append(f"revoked at {row['revoked_at']} with no superseding credential")
         downgrade("revoked")
 
-    norm_origin = (origin_country or "").strip().lower()
     if not origin_country:
         reasons.append("origin country not recorded")
         downgrade("insufficient_data")
-    elif norm_origin in BANNED_ORIGIN_COUNTRIES:
+    elif is_banned_origin(origin_country):
         reasons.append(f"origin country '{origin_country}' is FEOC-covered")
         downgrade("fail")
 

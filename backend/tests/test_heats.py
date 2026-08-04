@@ -89,6 +89,23 @@ def _login_org_user(client, conn):
     return org_id
 
 
+def test_evaluate_sublot_flag_agrees_with_passport_engine_on_concatenated_origin():
+    """main.py's extraction/correction-time flagging and passport.py's
+    verification-time recheck both call passport_engine.is_banned_origin
+    now, instead of each doing their own `in BANNED_ORIGIN_COUNTRIES`
+    check -- this proves the flagging side actually uses it (not just
+    the verification side covered in test_passport.py), so the two
+    surfaces can't drift again the way they did for the live
+    "ChinaUnited States" bug."""
+    flags = main._evaluate_sublot_flag({"origin_country": "ChinaUnited States", "origin_confidence": "high"})
+    assert any(f["issue_type"] == "compliance_violation" for f in flags)
+
+
+def test_evaluate_sublot_flag_does_not_misflag_taiwan():
+    flags = main._evaluate_sublot_flag({"origin_country": "Republic of China", "origin_confidence": "high"})
+    assert not any(f["issue_type"] == "compliance_violation" for f in flags)
+
+
 def test_upload_stores_object_and_content_hash(client, conn):
     _login_org_user(client, conn)
     resp = _upload(client)

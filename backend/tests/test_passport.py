@@ -104,6 +104,74 @@ def test_banned_origin_country_fails(conn):
     assert any("FEOC-covered" in r for r in result["nodes"][0]["reasons"])
 
 
+@pytest.mark.parametrize(
+    "origin_country,expected_banned",
+    [
+        # The live bug: a botched correction concatenated onto the
+        # original value instead of replacing it. Exact-match membership
+        # (the old implementation) never catches this since the string
+        # is no longer *equal to* "china" -- it must be a substring
+        # match to catch it.
+        ("ChinaUnited States", True),
+        # Whitespace/casing normalization.
+        ("  china  ", True),
+        ("CHINA", True),
+        ("China\n", True),
+        ("china", True),
+        # Plain exact cases, unchanged behavior.
+        ("China", True),
+        ("Iran", True),
+        ("North Korea", True),
+        ("Russia", True),
+        # False-positive guard: Taiwan's official name contains "china"
+        # as a substring but is not FEOC-covered.
+        ("Republic of China", False),
+        ("Taiwan", False),
+        # The Taiwan carve-out must not over-exempt: a genuinely banned
+        # country mentioned alongside it still has to trip the check.
+        ("Republic of China, blended with Russian-sourced scrap", True),
+        # Legitimate non-China origins that happen to be adjacent
+        # geography/spelling shouldn't false-positive.
+        ("South Korea", False),
+        ("United States", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_is_banned_origin_matches_expected(origin_country, expected_banned):
+    assert passport_engine.is_banned_origin(origin_country) is expected_banned
+
+
+def test_concatenated_origin_country_fails(conn):
+    """Regression test for the live bug: a corrupted origin_country value
+    ("ChinaUnited States", produced by a correction-panel bug that
+    concatenated instead of replaced) must still fail verification, not
+    silently pass because it doesn't exactly equal "china"."""
+    issuer_id, key_path = make_issuer(conn)
+    subject = {**US_NDFEB_SUBJECT, "origin_country": "ChinaUnited States"}
+    cred_id = issue_credential(conn, issuer_id, key_path, "sintered_ndfeb_batch", subject, None, [])
+    conn.commit()
+
+    result = passport_engine.compile_passport(conn, cred_id)
+
+    assert result["verdict"] == "fail"
+    assert any("FEOC-covered" in r for r in result["nodes"][0]["reasons"])
+
+
+def test_taiwan_origin_country_is_not_banned(conn):
+    """Republic of China (Taiwan) contains "china" as a substring but is
+    not FEOC-covered -- must not be misflagged by the substring match
+    that test_concatenated_origin_country_fails now requires."""
+    issuer_id, key_path = make_issuer(conn)
+    subject = {**US_NDFEB_SUBJECT, "origin_country": "Republic of China"}
+    cred_id = issue_credential(conn, issuer_id, key_path, "sintered_ndfeb_batch", subject, None, [])
+    conn.commit()
+
+    result = passport_engine.compile_passport(conn, cred_id)
+
+    assert result["verdict"] == "pass"
+
+
 def test_out_of_scope_material_is_insufficient_data_not_fail(conn):
     issuer_id, key_path = make_issuer(conn)
     subject = {**US_NDFEB_SUBJECT, "material_type": "Lithium-ion battery cell"}
