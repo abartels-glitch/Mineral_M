@@ -210,6 +210,7 @@ def _evaluate_node(conn: sqlite3.Connection, credential_id: str) -> tuple[dict, 
             "origin_country": origin_country,
             "node_status": node_status,
             "reasons": reasons,
+            "sources": sources,
         },
         sources,
     )

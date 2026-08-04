@@ -44,7 +44,7 @@
       <div class="ar-split">
         <div class="ar-custody">
           <h3 class="ar-section-label">Chain of custody</h3>
-          <ul id="node-rows" class="ar-custody-list"></ul>
+          <ul id="node-rows" class="ar-tree-list ar-tree-root"></ul>
         </div>
         <div class="ar-uii-panel">
           <h3 class="ar-section-label" style="margin-bottom: 0.7rem">UII / Data Matrix</h3>
@@ -320,25 +320,66 @@
         reasonsEl.appendChild(el("li", { text: reason }));
       }
 
+      renderCustodyTree(result);
+    }
+
+    function buildTreeRow(node) {
+      const meta = [node.material_type, node.origin_country].filter(Boolean).join(" · ");
+      return el("div", { class: `ar-tree-row ${node.node_status}` }, [
+        el("span", { class: "ar-tree-id", text: node.credential_id.slice(0, 12) + "…" }),
+        el("div", { class: "ar-tree-main" }, [
+          el("div", { class: "ar-tree-type", text: node.credential_type }),
+          meta ? el("div", { class: "ar-tree-meta", text: meta }) : null,
+          node.reasons && node.reasons.length
+            ? el("div", { class: "ar-tree-reasons", text: node.reasons.join("; ") })
+            : null,
+        ]),
+        el("span", { class: "ar-tree-status" }, [
+          el("span", { class: `ar-status-pill ${node.node_status}`, text: verdictLabel(node.node_status) }),
+        ]),
+      ]);
+    }
+
+    // Recursive, not the flat pre-order list compile_passport's own
+    // `nodes` array happens to be -- each node's `sources` (added
+    // specifically so this could reconstruct the tree) says who's a
+    // child of whom. Keeps its own visited set, separate from
+    // compile_passport's server-side one: a malformed/adversarial cycle
+    // in stored sources_json shouldn't be able to recurse forever in
+    // the browser even though the server-side walk already guards
+    // itself the same way.
+    function buildTreeNode(nodesById, nodeId, visited, isRoot) {
+      const node = nodesById.get(nodeId);
+      if (!node || visited.has(nodeId)) return null;
+      const nextVisited = new Set(visited);
+      nextVisited.add(nodeId);
+
+      const li = el("li", { class: "ar-tree-node" }, [buildTreeRow(node)]);
+      const sources = node.sources || [];
+      if (isRoot && sources.length === 0) {
+        li.appendChild(
+          el("p", {
+            class: "ar-single-origin-note",
+            text: "No additional sources — single-origin credential, not a composite.",
+          })
+        );
+      } else if (sources.length) {
+        const childList = el("ul", { class: "ar-tree-list" });
+        for (const sourceId of sources) {
+          const childLi = buildTreeNode(nodesById, sourceId, nextVisited, false);
+          if (childLi) childList.appendChild(childLi);
+        }
+        if (childList.children.length) li.appendChild(childList);
+      }
+      return li;
+    }
+
+    function renderCustodyTree(result) {
       const rows = document.getElementById("node-rows");
       rows.innerHTML = "";
-      for (const node of result.nodes) {
-        const meta = [node.material_type, node.origin_country].filter(Boolean).join(" · ");
-        rows.appendChild(
-          el("li", { class: `ar-custody-row ${node.node_status}` }, [
-            el("span", { class: "ar-custody-id", text: node.credential_id.slice(0, 12) + "…" }),
-            el("div", { class: "ar-custody-main" }, [
-              el("div", { class: "ar-custody-type", text: node.credential_type }),
-              meta ? el("div", { class: "ar-custody-meta", text: meta }) : null,
-              node.reasons && node.reasons.length
-                ? el("div", { class: "ar-custody-reasons", text: node.reasons.join("; ") })
-                : null,
-            ]),
-            el("span", { class: "ar-custody-status" }, [
-              el("span", { class: `ar-status-pill ${node.node_status}`, text: verdictLabel(node.node_status) }),
-            ]),
-          ])
-        );
-      }
+      if (!result.nodes.length) return;
+      const nodesById = new Map(result.nodes.map((n) => [n.credential_id, n]));
+      const rootLi = buildTreeNode(nodesById, result.nodes[0].credential_id, new Set(), true);
+      if (rootLi) rows.appendChild(rootLi);
     }
   </script>

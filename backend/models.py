@@ -163,6 +163,12 @@ class PassportNodeResult(BaseModel):
     origin_country: Optional[str]
     node_status: NodeStatus
     reasons: list[str]
+    # Parent credential ids (this node's own sources_json) -- lets the
+    # frontend reconstruct the tree (who's a child of whom) from what
+    # would otherwise be a flat pre-order list. Not used by verdict logic
+    # itself; compile_passport already computes this per node, it just
+    # wasn't attached to the node dict before now.
+    sources: list[str] = []
 
 
 class PassportResult(BaseModel):
