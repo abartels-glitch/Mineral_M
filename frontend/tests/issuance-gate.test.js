@@ -72,7 +72,9 @@ test("a reviewed heat with an open blocking flag shows a blocked notice, not the
   const card = window.renderHeatCard({ id: "doc-1" }, heat, []);
 
   assert.ok(!card.innerHTML.includes("Issue a credential from this heat"), "should not offer the issuance form");
-  assert.ok(card.innerHTML.includes("can't be issued"), "expected the blocked notice");
+  assert.ok(card.innerHTML.includes("Issuance blocked"), "expected the Integrity Gate notice");
+  assert.ok(card.innerHTML.includes("compliance_violation"), "gate should name the open blocking issue");
+  assert.ok(card.innerHTML.includes("origin_country"), "gate should name the offending field");
 });
 
 test("a reviewed heat with only a resolved blocking flag still shows the working issue panel", () => {
@@ -98,7 +100,7 @@ test("a reviewed heat with only a resolved blocking flag still shows the working
   const card = window.renderHeatCard({ id: "doc-1" }, heat, []);
 
   assert.ok(card.innerHTML.includes("Issue a credential from this heat"), "resolved flag should no longer block issuance");
-  assert.ok(!card.innerHTML.includes("can't be issued"));
+  assert.ok(!card.innerHTML.includes("Issuance blocked"));
 });
 
 test("a reviewed heat with only a needs_review (non-blocking) flag still shows the working issue panel", () => {
@@ -120,5 +122,5 @@ test("a reviewed heat with only a needs_review (non-blocking) flag still shows t
   const card = window.renderHeatCard({ id: "doc-1" }, heat, []);
 
   assert.ok(card.innerHTML.includes("Issue a credential from this heat"));
-  assert.ok(!card.innerHTML.includes("can't be issued"));
+  assert.ok(!card.innerHTML.includes("Issuance blocked"));
 });

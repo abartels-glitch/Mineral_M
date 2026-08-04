@@ -1,6 +1,16 @@
 <title>Review Queue — FEOC Compliance Passport</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="stylesheet" href="/style.css" />
+<link rel="stylesheet" href="/passport.css" />
+<link rel="stylesheet" href="/review.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700;800&display=swap"
+  rel="stylesheet"
+/>
 
+<body class="attestation-record">
 <header id="header-root"></header>
 
 <main>
@@ -77,7 +87,7 @@
         { onclick: () => selectDocument(doc.id), class: doc.id === selectedDocumentId ? "selected" : "" },
         [
           el("span", { text: displayFilename(doc) }),
-          el("span", { class: `badge status-${doc.status}`, text: doc.status }),
+          el("span", { class: `ar-pill ar-pill-workflow${doc.status === "reviewed" ? " reviewed" : ""}`, text: doc.status }),
         ]
       );
       list.appendChild(li);
@@ -140,9 +150,9 @@
   // (e.g. a sub-lot origin that's unconfirmed or covered-country), so it
   // must never collapse into looking like a clean miss.
   function tag(state, label) {
-    const cls = state === "blocking" ? "tag-blocking" : state === "flagged" ? "tag-flagged" : state === "found" ? "tag-found" : "tag-missing";
+    const cls = state === "blocking" ? "ar-pill-blocking" : state === "flagged" ? "ar-pill-needs-review" : state === "found" ? "ar-pill-found" : "ar-pill-missing";
     const defaultLabel = state === "blocking" ? "blocking" : state === "flagged" ? "flagged" : state === "found" ? "found" : "not found";
-    return el("span", { class: `tag ${cls}`, text: label || defaultLabel });
+    return el("span", { class: `ar-pill ${cls}`, text: label || defaultLabel });
   }
 
   // Structured review flags — {issue_type, field_name, severity, human_readable_reason,
@@ -161,18 +171,19 @@
     });
     const items = sorted.map((f) => {
       const resolved = f.status === "resolved";
-      return el("li", { class: `flag-item ${f.severity}${resolved ? " resolved" : ""}` }, [
-        el("span", { class: "flag-severity", text: resolved ? "resolved" : f.severity.replace("_", " ") }),
-        el("span", { class: "flag-reason", text: f.human_readable_reason }),
+      const severityPillClass = resolved ? "ar-pill-resolved" : f.severity === "blocking" ? "ar-pill-blocking" : "ar-pill-needs-review";
+      return el("li", { class: `rq-flag-row${resolved ? " resolved" : ""}` }, [
+        el("span", { class: `ar-pill ${severityPillClass}`, text: resolved ? "resolved" : f.severity.replace("_", " ") }),
+        el("span", { class: "rq-flag-reason", text: f.human_readable_reason }),
         el("span", {
-          class: "flag-meta",
+          class: "rq-flag-meta",
           text: resolved
             ? `${f.issue_type}${f.field_name ? " · " + f.field_name : ""} · resolved by ${f.resolved_by} at ${f.resolved_at}`
             : `${f.issue_type}${f.field_name ? " · " + f.field_name : ""} · ${f.source}`,
         }),
       ]);
     });
-    return el("ul", { class: "flag-list" }, items);
+    return el("ul", { class: "rq-flag-list" }, items);
   }
 
   // Must stay in sync with main.py's _HEAT_CORRECTABLE_FIELDS keys --
@@ -199,8 +210,8 @@
     }
     if (!targets.length) return null;
 
-    const container = el("div", { class: "correction-panel" });
-    container.appendChild(el("h4", { text: "Correct flagged fields", style: "margin: 0 0 0.4rem 0; font-size: 0.85rem" }));
+    const container = el("div", { class: "rq-correction-panel" });
+    container.appendChild(el("h4", { text: "Correct flagged fields" }));
 
     for (const { target, sublot, flag } of targets) {
       const label = target === "sublot" ? `Sub-lot ${sublot.sublot_id || sublot.id.slice(0, 6)} · ${flag.field_name}` : flag.field_name;
@@ -216,34 +227,40 @@
       // fix lives on the sub-lot itself, rendered separately below),
       // and an LLM-phrased field_name (sometimes an indexed/compound
       // path) that was never a real correctable column at all.
+      //
+      // Both read-only branches below render one compact row with a
+      // micro-tag rather than a row plus a separate explanatory
+      // paragraph -- the full original sentence isn't dropped, just
+      // moved to the tag's title attribute (hover/inspect), same
+      // "presentation only" discipline as everywhere else this pass:
+      // nothing shown is removed, only how densely it's shown changes.
       if (target === "heat" && flag.sublot_id) {
         container.appendChild(
-          el("div", { class: "correction-row" }, [
-            el("span", { class: "correction-label", text: label }),
-            el("span", { class: "muted", text: flag.human_readable_reason }),
-          ])
-        );
-        container.appendChild(
-          el("p", { class: "muted", style: "margin: 0 0 0.6rem 0; font-size: 0.75rem" }, [
-            document.createTextNode("Resolved automatically when you correct the matching sub-lot below."),
+          el("div", { class: "rq-correction-row" }, [
+            el("span", { class: "rq-correction-label", text: label }),
+            el("span", { class: "rq-correction-reason", text: flag.human_readable_reason }),
+            el("span", {
+              class: "rq-tag-readonly",
+              text: "→ see sub-lot below",
+              title: "Resolved automatically when you correct the matching sub-lot below.",
+            }),
           ])
         );
         continue;
       }
       if (target === "heat" && !HEAT_CORRECTABLE_FIELDS.includes(flag.field_name)) {
+        const originRelated = isOriginRelatedFieldName(flag.field_name);
         container.appendChild(
-          el("div", { class: "correction-row" }, [
-            el("span", { class: "correction-label", text: label }),
-            el("span", { class: "muted", text: flag.human_readable_reason }),
-          ])
-        );
-        container.appendChild(
-          el("p", { class: "muted", style: "margin: 0 0 0.6rem 0; font-size: 0.75rem" }, [
-            document.createTextNode(
-              isOriginRelatedFieldName(flag.field_name)
+          el("div", { class: "rq-correction-row" }, [
+            el("span", { class: "rq-correction-label", text: label }),
+            el("span", { class: "rq-correction-reason", text: flag.human_readable_reason }),
+            el("span", {
+              class: "rq-tag-readonly",
+              text: originRelated ? "→ see sub-lot table below" : "read-only — see Found below",
+              title: originRelated
                 ? "This concerns a sub-lot's origin — correct it in the sub-lot table below; it resolves automatically once every sub-lot's origin is compliant."
-                : "This field doesn't have a direct correction here — review it in the Found section below and submit a review once the data looks right."
-            ),
+                : "This field doesn't have a direct correction here — review it in the Found section below and submit a review once the data looks right.",
+            }),
           ])
         );
         continue;
@@ -266,7 +283,7 @@
             ? buildKeyValueEditor(currentValue, false)
             : buildTestResultsEditor(currentValue, false);
         const saveBtn = el("button", {
-          class: "icon-btn",
+          class: "rq-save-btn",
           type: "button",
           text: "Save correction",
           onclick: async () => {
@@ -289,9 +306,9 @@
           },
         });
         container.appendChild(
-          el("div", { class: "correction-row" }, [
-            el("span", { class: "correction-label", text: label }),
-            el("span", { class: "muted", text: flag.human_readable_reason }),
+          el("div", { class: "rq-correction-row" }, [
+            el("span", { class: "rq-correction-label", text: label }),
+            el("span", { class: "rq-correction-reason", text: flag.human_readable_reason }),
           ])
         );
         container.appendChild(editor.container);
@@ -301,7 +318,7 @@
 
       const input = el("input", { type: "text", value: currentValue ?? "" });
       const saveBtn = el("button", {
-        class: "icon-btn",
+        class: "rq-save-btn",
         type: "button",
         text: "Save correction",
         onclick: async () => {
@@ -324,9 +341,9 @@
         },
       });
       container.appendChild(
-        el("div", { class: "correction-row" }, [
-          el("span", { class: "correction-label", text: label }),
-          el("span", { class: "muted", text: flag.human_readable_reason }),
+        el("div", { class: "rq-correction-row" }, [
+          el("span", { class: "rq-correction-label", text: label }),
+          el("span", { class: "rq-correction-reason", text: flag.human_readable_reason }),
           input,
           saveBtn,
         ])
@@ -337,18 +354,18 @@
 
   function renderCorrectionHistory(trail) {
     if (!trail || !trail.length) return null;
-    const container = el("div", {});
-    container.appendChild(el("h4", { text: "Correction history", style: "margin: 0.75rem 0 0.4rem 0; font-size: 0.85rem" }));
+    const container = el("div", { style: "margin-top: 1rem" });
+    container.appendChild(el("h4", { class: "rq-zone-title", text: "Correction history" }));
     const rows = trail.map((entry) =>
       el("tr", {}, [
-        el("td", { text: entry.created_at }),
+        el("td", { class: "ar-mono", text: entry.created_at }),
         el("td", { text: entry.action }),
-        el("td", { text: entry.actor }),
+        el("td", { class: "ar-mono", text: entry.actor }),
         el("td", { text: formatAuditDetail(entry.detail) }),
       ])
     );
     container.appendChild(
-      el("table", {}, [
+      el("table", { class: "ar-data-table" }, [
         el("thead", {}, [
           el("tr", {}, [el("th", { text: "When" }), el("th", { text: "Action" }), el("th", { text: "Actor" }), el("th", { text: "Detail" })]),
         ]),
@@ -520,7 +537,7 @@
           ])
         );
       }
-      const rowClass = worstSeverity === "blocking" ? "blocking-row" : worstSeverity ? "flagged-row" : "";
+      const rowClass = worstSeverity === "blocking" ? "blocking-row" : worstSeverity ? "needs-review-row" : "";
       const row = el("tr", { class: rowClass }, cells);
       // Carries the existing heat_sublots row id (if any) through to
       // getValue() below, so a /review submission can round-trip it and
@@ -544,7 +561,7 @@
     ];
     if (!locked) headerCells.push(el("th", { text: "" }));
 
-    const table = el("table", { class: "editable-table" }, [el("thead", {}, [el("tr", {}, headerCells)]), tbody]);
+    const table = el("table", { class: "ar-data-table editable" }, [el("thead", {}, [el("tr", {}, headerCells)]), tbody]);
     const container = el("div", {}, [table]);
     if (!locked) {
       container.appendChild(el("button", { class: "icon-btn", type: "button", text: "+ sub-lot", onclick: () => addRow({}) }));
@@ -572,7 +589,7 @@
 
   function renderHeatCard(doc, heat, trail) {
     const locked = heat.reviewed;
-    const card = el("div", { class: "heat-card" });
+    const card = el("div", { class: "rq-card" });
     const statusEl = el("p", { class: "error" });
 
     // status check matters, not just severity: a blocking flag that's
@@ -590,12 +607,12 @@
     // form alone used to be enough, which let a heat with a still-open
     // blocking flag read as "reviewed" in the UI.
     const badgeReviewed = heat.reviewed && heat.fully_addressed;
-    headerTags.push(el("span", { class: `badge status-${badgeReviewed ? "reviewed" : "extracted"}`, text: badgeReviewed ? "reviewed" : "needs review" }));
+    headerTags.push(el("span", { class: `ar-pill ar-pill-workflow${badgeReviewed ? " reviewed" : ""}`, text: badgeReviewed ? "reviewed" : "needs review" }));
 
     card.appendChild(
-      el("div", { class: "heat-card-header" }, [
+      el("div", { class: "rq-card-header" }, [
         el("h3", { text: `Heat: ${heat.heat_id || "(no heat id found)"}` }),
-        el("div", {}, headerTags),
+        el("div", { class: "rq-card-header-tags" }, headerTags),
       ])
     );
     // Zone: Needs attention — open flags + the correction form to fix
@@ -611,8 +628,8 @@
       await renderDocumentPanel(updatedDoc);
     });
     if (heatFlagList || correctionPanel) {
-      const attentionZone = el("div", { class: `zone zone-attention${hasBlockingFlag ? " blocking" : ""}` }, [
-        el("div", { class: "zone-title", text: "Needs attention" }),
+      const attentionZone = el("div", { class: `rq-zone rq-zone-attention${hasBlockingFlag ? " blocking" : ""}` }, [
+        el("div", { class: "rq-zone-title", text: "Needs attention" }),
       ]);
       if (heatFlagList) attentionZone.appendChild(heatFlagList);
       if (correctionPanel) attentionZone.appendChild(correctionPanel);
@@ -621,18 +638,18 @@
 
     // Zone: Found — the fields extraction actually recovered, kept
     // quiet/neutral since these don't need the reviewer's attention.
-    const foundZone = el("div", { class: "zone zone-found" }, [el("div", { class: "zone-title", text: "Found" })]);
+    const foundZone = el("div", { class: "rq-zone" }, [el("div", { class: "rq-zone-title", text: "Found" })]);
 
     const heatIdInput = el("input", { type: "text", value: heat.heat_id || "", disabled: locked ? "disabled" : null });
     const massInput = el("input", { type: "text", value: heat.mass_kg ?? "", disabled: locked ? "disabled" : null });
 
     foundZone.append(
-      el("div", { class: "field-row" }, [
-        el("div", { class: "field-row-head" }, [el("span", { class: "field-row-label", text: "Heat / melt id" }), heat.heat_id ? tag("found") : tag("missing")]),
+      el("div", { class: "rq-field-row" }, [
+        el("div", { class: "rq-field-row-head" }, [el("span", { class: "rq-field-label", text: "Heat / melt id" }), heat.heat_id ? tag("found") : tag("missing")]),
         heatIdInput,
       ]),
-      el("div", { class: "field-row" }, [
-        el("div", { class: "field-row-head" }, [el("span", { class: "field-row-label", text: "Mass (kg)" }), heat.mass_kg != null ? tag("found") : tag("missing")]),
+      el("div", { class: "rq-field-row" }, [
+        el("div", { class: "rq-field-row-head" }, [el("span", { class: "rq-field-label", text: "Mass (kg)" }), heat.mass_kg != null ? tag("found") : tag("missing")]),
         massInput,
       ])
     );
@@ -659,7 +676,7 @@
 
     // Zone: Feedstock sub-lots / compliance table — its own visually
     // separated section rather than appended after everything else.
-    const sublotZone = el("div", { class: "zone zone-sublots" }, [el("div", { class: "zone-title", text: "Feedstock sub-lots" })]);
+    const sublotZone = el("div", { class: "rq-zone" }, [el("div", { class: "rq-zone-title", text: "Feedstock sub-lots" })]);
     const sublotEditor = buildSublotEditor(heat.sublots, locked);
     sublotZone.appendChild(sublotEditor.container);
     card.appendChild(sublotZone);
@@ -667,8 +684,8 @@
     if (!locked) {
       card.appendChild(
         el("button", {
+          class: "rq-submit-btn",
           text: "Submit review",
-          style: "margin-top: 0.75rem",
           onclick: async () => {
             statusEl.textContent = "";
             const body = {
@@ -728,7 +745,7 @@
         // that's now a covered country) -- the backend enforces this
         // regardless, but no point showing a reissue form the API would
         // just 409.
-        card.appendChild(hasBlockingFlag ? renderIssuanceBlockedNotice() : renderIssuePanel(doc, heat));
+        card.appendChild(hasBlockingFlag ? renderIssuanceBlockedNotice(heat) : renderIssuePanel(doc, heat));
       } else {
         card.appendChild(
           el("p", { class: "success" }, [
@@ -741,13 +758,14 @@
         // renders on every subsequent load/re-render of an already-
         // issued heat's card.
         card.appendChild(
-          el("div", { style: "margin-top: 0.5rem" }, [
+          el("div", {}, [
             el("label", { text: "Data Matrix (scan to open this passport)" }),
-            el("img", {
-              src: `/credentials/${heat.credential_id}/uii/image`,
-              alt: `Data Matrix for credential ${heat.credential_id}`,
-              style: "width: 120px; height: 120px; image-rendering: pixelated; border: 1px solid var(--border); border-radius: 6px; background: #fff",
-            }),
+            el("div", { class: "rq-datamatrix-tag" }, [
+              el("img", {
+                src: `/credentials/${heat.credential_id}/uii/image`,
+                alt: `Data Matrix for credential ${heat.credential_id}`,
+              }),
+            ]),
           ])
         );
       }
@@ -756,7 +774,7 @@
       // The backend rejects issuance from a heat with an open blocking
       // flag regardless (main.py's issue_credential) -- this just
       // avoids inviting an action that would only come back as a 409.
-      card.appendChild(hasBlockingFlag ? renderIssuanceBlockedNotice() : renderIssuePanel(doc, heat));
+      card.appendChild(hasBlockingFlag ? renderIssuanceBlockedNotice(heat) : renderIssuePanel(doc, heat));
     }
 
     card.appendChild(statusEl);
@@ -765,17 +783,35 @@
     return card;
   }
 
-  function renderIssuanceBlockedNotice() {
-    return el("p", { class: "error", style: "margin-top: 1rem" }, [
-      document.createTextNode(
-        "A credential can't be issued while an open blocking issue (e.g. an unresolved compliance violation) remains on this heat — resolve it above first."
-      ),
+  // The Integrity Gate -- same shape as passport.html's Attestation
+  // Block at a smaller scale (heavy word, rule, mono label:value
+  // fields), not a generic disabled-state message. Both pages are
+  // making the same kind of claim here ("this can't be signed until
+  // the integrity check passes"), so it's the one place in the review
+  // tool that deliberately borrows the public passport page's own
+  // structure, not just its tokens. Reasons/details for each open
+  // blocking flag are already shown in the "Needs attention" zone above
+  // (which renders regardless of lock state -- corrections stay
+  // available after review, same as before this pass), so this stays
+  // declarative rather than re-explaining them.
+  function renderIssuanceBlockedNotice(heat) {
+    const openBlockingFlags = (heat.flags || []).filter((f) => f.severity === "blocking" && f.status !== "resolved");
+    const fields = [el("dt", { text: "Heat" }), el("dd", { text: heat.heat_id || "(no heat id found)" })];
+    for (const f of openBlockingFlags) {
+      fields.push(el("dt", { text: "Open issue" }));
+      fields.push(el("dd", { text: `${f.issue_type}${f.field_name ? " · " + f.field_name : ""}` }));
+    }
+    return el("div", { class: "rq-gate" }, [
+      el("div", { class: "rq-gate-word", text: "Issuance blocked" }),
+      el("hr", { class: "rq-gate-rule" }),
+      el("dl", { class: "rq-gate-fields" }, fields),
+      el("p", { class: "rq-gate-note", text: "Resolve the issue(s) above before a credential can be issued from this heat." }),
     ]);
   }
 
   function renderIssuePanel(doc, heat) {
-    const container = el("div", { style: "margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border)" });
-    container.appendChild(el("h4", { text: "Issue a credential from this heat", style: "margin: 0 0 0.5rem 0; font-size: 0.85rem" }));
+    const container = el("div", { class: "rq-issue-panel" });
+    container.appendChild(el("h4", { text: "Issue a credential from this heat" }));
 
     const compositionKeys = Object.keys(heat.alloy_composition || {});
     const looksLikeNdFeB = ["Nd", "Fe", "B"].every((k) => compositionKeys.includes(k));
@@ -804,7 +840,7 @@
       el(
         "label",
         {
-          style: `display:flex;align-items:center;gap:0.4rem;font-weight:normal;${c.revoked_at ? "color:var(--muted)" : "color:inherit"}`,
+          style: `display:flex;align-items:center;gap:0.4rem;font-weight:normal;font-family:'IBM Plex Sans',sans-serif;font-size:0.85rem;${c.revoked_at ? "color:var(--slate)" : "color:var(--ink)"}`,
         },
         [
           el("input", { type: "checkbox", value: c.id, class: "source-checkbox", disabled: c.revoked_at ? "disabled" : null }),
@@ -844,6 +880,7 @@
     const resultEl = el("p", {});
 
     const submitBtn = el("button", {
+      class: "rq-submit-btn",
       text: "Issue credential",
       onclick: async () => {
         const sources = Array.from(container.querySelectorAll(".source-checkbox:checked")).map((c) => c.value);
@@ -872,13 +909,11 @@
           resultEl.appendChild(el("span", { class: "success", text: `Issued credential ${cred.id}. ` }));
           resultEl.appendChild(el("a", { href: `/passport.html?id=${cred.id}`, text: "View passport →" }));
           resultEl.appendChild(
-            el("div", { style: "margin-top: 0.5rem" }, [
+            el("div", {}, [
               el("label", { text: "Data Matrix (scan to open this passport)" }),
-              el("img", {
-                src: `/credentials/${cred.id}/uii/image`,
-                alt: `Data Matrix for credential ${cred.id}`,
-                style: "width: 120px; height: 120px; image-rendering: pixelated; border: 1px solid var(--border); border-radius: 6px; background: #fff",
-              }),
+              el("div", { class: "rq-datamatrix-tag" }, [
+                el("img", { src: `/credentials/${cred.id}/uii/image`, alt: `Data Matrix for credential ${cred.id}` }),
+              ]),
             ])
           );
           credentials = await apiFetch("/credentials");

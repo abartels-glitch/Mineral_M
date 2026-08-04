@@ -1,0 +1,477 @@
+/* index.html's own component layer on top of "The Attestation Record"
+   system -- passport.css (loaded alongside this file) supplies the
+   shared tokens, base reset, focus-visible, header, and font-family;
+   nothing here re-derives those. This file is the review queue's
+   working-tool vocabulary: denser, faster to scan, edited constantly --
+   a different pacing than passport.html's slower, document-like one,
+   built from the same materials. */
+
+body.attestation-record main {
+  /* Wider than passport.html's 980px -- this page is a two-column
+     working layout (doc-list sidebar + review content), not a single
+     read-focused column. */
+  max-width: 1180px;
+}
+
+body.attestation-record .page-title {
+  font-family: "IBM Plex Sans", sans-serif;
+  font-weight: 800;
+  font-size: 1.3rem;
+  letter-spacing: 0.03em;
+  margin: 0;
+}
+
+/* ---- generic panel: neutral bordered container, the same device the
+   Attestation Block/UII panel already established. "No boxes" bans
+   colored fills for status, not bordered containers outright. ---- */
+body.attestation-record .panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 1.1rem 1.3rem;
+}
+body.attestation-record .panel h2 {
+  font-family: "IBM Plex Sans", sans-serif;
+  font-weight: 700;
+  font-size: 0.95rem;
+  margin: 0 0 0.5rem 0;
+}
+
+/* Doc-list | review-panel: fixed sidebar + flexible content, not the
+   equal-width auto-fit split -- this is master-detail navigation, a
+   different structural pattern from passport.html's asymmetric
+   chain-of-custody/UII pairing, so it doesn't need to solve the same
+   "does this read as two cards" problem. */
+body.attestation-record .side-by-side {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 1.25rem;
+  align-items: start;
+}
+@media (max-width: 760px) {
+  body.attestation-record .side-by-side { grid-template-columns: 1fr; }
+}
+
+body.attestation-record .doc-list { list-style: none; margin: 0; padding: 0; }
+body.attestation-record .doc-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.4rem;
+  border-bottom: 1px solid var(--rule);
+  cursor: pointer;
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 0.85rem;
+}
+body.attestation-record .doc-list li:hover { background: var(--paper); }
+body.attestation-record .doc-list li.selected {
+  background: var(--paper);
+  border-left: 3px solid var(--ink);
+  padding-left: calc(0.4rem - 3px);
+}
+
+/* ---- pill vocabulary: same border-only/mono/uppercase mechanism as
+   passport.css's .ar-status-pill, a new state vocabulary layered on for
+   flag severity/resolution and field found/missing. Workflow status
+   (has this been reviewed yet?) stays deliberately separate from
+   compliance severity -- ink/slate, never red/amber/green -- carrying
+   forward style.css's own established reasoning that "is there a
+   problem?" and "has someone signed off?" are different questions. ---- */
+.ar-pill {
+  display: inline-block;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.12rem 0.45rem;
+  border-radius: 3px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.ar-pill-blocking { color: var(--contested); border-color: var(--contested); }
+.ar-pill-needs-review { color: var(--insufficient); border-color: var(--insufficient); }
+.ar-pill-resolved { color: var(--slate); border-color: var(--rule-strong); text-decoration: line-through; }
+.ar-pill-found { color: var(--attested); border-color: var(--attested); }
+.ar-pill-missing { color: var(--slate); border-color: var(--rule-strong); }
+.ar-pill-workflow { color: var(--slate); border-color: var(--rule-strong); }
+.ar-pill-workflow.reviewed { color: var(--ink); border-color: var(--ink); }
+
+/* ---- heat card ---- */
+.rq-card {
+  background: var(--panel-bg);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 1.1rem 1.3rem 1.3rem;
+  margin-bottom: 1.25rem;
+}
+.rq-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--rule-strong);
+  padding-bottom: 0.7rem;
+  margin-bottom: 0.2rem;
+}
+.rq-card-header h3 {
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 1rem;
+  font-weight: 700;
+  margin: 0;
+}
+.rq-card-header-tags { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+
+/* ---- zones: rule + label, not filled boxes ---- */
+.rq-zone { margin: 1.1rem 0; }
+.rq-zone:first-of-type { margin-top: 0.9rem; }
+.rq-zone-title {
+  font-family: "IBM Plex Sans", sans-serif;
+  font-weight: 700;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--slate);
+  margin: 0 0 0.6rem 0;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--rule);
+}
+
+/* Needs attention: colored left border down the whole zone (same device
+   as the chain-of-custody tree's row accents) + colored title, scaled
+   to blocking vs needs_review severity -- the one zone that has to stay
+   legibly urgent without reverting to a filled alert box. */
+.rq-zone-attention {
+  border-left: 3px solid var(--insufficient);
+  padding-left: 0.9rem;
+}
+.rq-zone-attention.blocking { border-left-color: var(--contested); }
+.rq-zone-attention .rq-zone-title {
+  color: var(--insufficient);
+  border-top: none;
+  padding-top: 0;
+}
+.rq-zone-attention.blocking .rq-zone-title { color: var(--contested); }
+
+.rq-flag-list { list-style: none; margin: 0 0 0.9rem; padding: 0; }
+.rq-flag-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--rule);
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 0.82rem;
+}
+.rq-flag-row:last-child { border-bottom: none; }
+.rq-flag-reason { flex: 1; min-width: 160px; }
+.rq-flag-meta {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.68rem;
+  color: var(--slate);
+  white-space: nowrap;
+}
+.rq-flag-row.resolved .rq-flag-reason { color: var(--slate); text-decoration: line-through; }
+
+/* ---- correction panel: dashed border kept as the "action panel"
+   signal (distinct from the card's solid-bordered structural
+   container), retextured. Micro-tags mark the two read-only branches;
+   editable rows get nothing extra since the input+button already reads
+   as editable unambiguously -- a redundant "EDITABLE" tag on every real
+   input would have been the actual noise. ---- */
+.rq-correction-panel {
+  border: 1px dashed var(--rule-strong);
+  border-radius: 4px;
+  padding: 0.8rem 0.9rem;
+  margin-bottom: 0.3rem;
+}
+.rq-correction-panel h4 {
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 0.8rem;
+  font-weight: 700;
+  margin: 0 0 0.6rem 0;
+}
+.rq-correction-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+.rq-correction-row:last-child { border-bottom: none; }
+.rq-correction-label {
+  font-family: "IBM Plex Sans", sans-serif;
+  font-weight: 600;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+.rq-correction-reason {
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 0.78rem;
+  color: var(--slate);
+  flex: 1;
+  min-width: 160px;
+}
+.rq-correction-row input[type="text"] {
+  flex: 1;
+  min-width: 120px;
+  margin: 0;
+  border-radius: 3px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.82rem;
+  padding: 0.35rem 0.5rem;
+}
+.rq-save-btn {
+  margin: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--ink);
+  font-family: "IBM Plex Sans", sans-serif;
+  font-weight: 600;
+  font-size: 0.75rem;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.rq-save-btn:hover { opacity: 0.8; }
+.rq-tag-readonly {
+  display: inline-block;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--slate);
+  white-space: nowrap;
+  cursor: help;
+}
+
+/* ---- Found zone: quiet field rows ---- */
+.rq-field-row { margin-bottom: 0.7rem; }
+.rq-field-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+.rq-field-row-head .rq-field-label {
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 0.82rem;
+  color: var(--slate);
+}
+.rq-field-row input[type="text"],
+.rq-field-row textarea {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  border-radius: 3px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.85rem;
+  padding: 0.4rem 0.55rem;
+}
+.rq-field-row textarea { font-family: "IBM Plex Sans", sans-serif; }
+
+/* key/value + test-results editors (alloy composition, test results) */
+.kv-editor { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.75rem; align-items: flex-end; }
+.kv-editor .kv-row { display: flex; gap: 0.3rem; align-items: center; }
+.kv-editor input, .kv-editor select {
+  border-radius: 3px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.82rem;
+  padding: 0.3rem 0.4rem;
+  width: 90px;
+  margin: 0;
+}
+.kv-editor input.kv-key { width: 64px; }
+
+/* ---- sub-lot table: .ar-data-table's shape (mono numerics, ruled
+   rows, uppercase mono headers), an .editable variant for inputs living
+   inside <td> -- same component passport.html's provenance table
+   already uses read-only, reused directly here rather than invented
+   twice. ---- */
+.ar-data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 0.82rem;
+}
+.ar-data-table th {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--slate);
+  text-align: left;
+  padding: 0.45rem 0.5rem;
+  border-bottom: 1px solid var(--rule-strong);
+}
+.ar-data-table td {
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: middle;
+}
+.ar-data-table td.ar-mono { font-family: "IBM Plex Mono", monospace; font-size: 0.8rem; }
+.ar-data-table.editable input[type="text"], .ar-data-table.editable select {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  border-radius: 3px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.8rem;
+  padding: 0.3rem 0.4rem;
+}
+.ar-data-table tr.blocking-row { border-left: 3px solid var(--contested); }
+.ar-data-table tr.needs-review-row { border-left: 3px solid var(--insufficient); }
+.ar-data-table .icon-btn { padding: 0.15rem 0.4rem; }
+
+.rq-submit-btn {
+  margin-top: 0.9rem;
+  border-radius: 3px;
+  background: var(--ink);
+  color: var(--paper);
+  border: 1px solid var(--ink);
+  font-family: "IBM Plex Sans", sans-serif;
+  font-weight: 600;
+  font-size: 0.85rem;
+  padding: 0.55rem 1.1rem;
+  cursor: pointer;
+}
+.rq-submit-btn:hover { opacity: 0.85; }
+
+.icon-btn {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.78rem;
+  background: transparent;
+  color: var(--slate);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  font-family: "IBM Plex Sans", sans-serif;
+  cursor: pointer;
+}
+.icon-btn:hover { color: var(--ink); border-color: var(--rule-strong); }
+
+/* ---- Issue-credential panel: same quiet ruled-form language as the
+   Found zone. ---- */
+.rq-issue-panel {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule-strong);
+}
+.rq-issue-panel h4 {
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 0.85rem;
+  font-weight: 700;
+  margin: 0 0 0.6rem 0;
+}
+.rq-issue-panel label {
+  display: block;
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 0.78rem;
+  color: var(--slate);
+  margin: 0.6rem 0 0.25rem;
+}
+.rq-issue-panel input[type="text"] {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  border-radius: 3px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.85rem;
+  padding: 0.4rem 0.55rem;
+}
+
+.rq-datamatrix-tag {
+  display: inline-block;
+  padding: 0.5rem;
+  background: var(--paper);
+  border: 1px solid var(--rule-strong);
+  border-radius: 3px;
+  margin-top: 0.5rem;
+}
+.rq-datamatrix-tag img {
+  display: block;
+  width: 108px;
+  height: 108px;
+  image-rendering: pixelated;
+}
+
+/* ---- Integrity Gate: the Attestation Block's own shape at a smaller
+   scale -- both pages making the same kind of claim ("this can't be
+   signed until the integrity check passes") get the same visual
+   treatment, not a generic disabled-state message. ---- */
+.rq-gate {
+  background: var(--panel-bg);
+  border: 1px solid var(--contested);
+  border-radius: 4px;
+  padding: 1rem 1.2rem 1.2rem;
+  margin-top: 1rem;
+}
+.rq-gate-word {
+  font-family: "IBM Plex Sans", sans-serif;
+  font-weight: 800;
+  font-size: 1.15rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--contested);
+  line-height: 1;
+}
+.rq-gate-rule { border: none; border-top: 1px solid var(--rule-strong); margin: 0.65rem 0 0.8rem; }
+.rq-gate-fields { display: grid; grid-template-columns: auto 1fr; gap: 0.35rem 1.2rem; margin: 0 0 0.8rem 0; }
+.rq-gate-fields dt {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--slate);
+  margin: 0;
+}
+.rq-gate-fields dd {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.82rem;
+  margin: 0;
+  word-break: break-word;
+}
+.rq-gate-note {
+  font-family: "IBM Plex Sans", sans-serif;
+  font-size: 0.85rem;
+  margin: 0;
+}
+@media (max-width: 480px) {
+  .rq-gate-fields { grid-template-columns: 1fr; }
+}
+
+body.attestation-record pre {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 0.75rem;
+  white-space: pre-wrap;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.78rem;
+  max-height: 260px;
+  overflow-y: auto;
+  color: var(--ink);
+}
+body.attestation-record label { color: var(--slate); font-family: "IBM Plex Sans", sans-serif; }
