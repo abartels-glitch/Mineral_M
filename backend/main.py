@@ -222,6 +222,66 @@ def _heat_own_flags(heat_flags: list[dict]) -> list[dict]:
     return [f for f in heat_flags if f.get("source") != "compliance_engine"]
 
 
+# The only field_name substrings a heat-level (sublot_id=None) flag can
+# carry that concern data with genuinely no heat-level home: origin is
+# inherently per-sub-lot (a heat can blend several, each with a
+# different origin), so there's no column on document_heats it could
+# ever map to. Substring match, not exact equality: the LLM's flag
+# schema leaves field_name as free text ("e.g. 'heat_id',
+# 'origin_country'" is a description, not an enum), so it sometimes
+# produces indexed/compound phrasing like
+# "feedstock_sublots[0].origin_country" instead of the plain name.
+_ORIGIN_FIELD_MARKERS = ("origin_country", "origin_confidence")
+
+
+def _is_origin_related_field_name(field_name: Optional[str]) -> bool:
+    return bool(field_name) and any(marker in field_name for marker in _ORIGIN_FIELD_MARKERS)
+
+
+def _resolve_heat_level_origin_flags_if_all_sublots_clear(
+    heat_flags: list[dict], all_sublot_flags: list[list[dict]], actor: str, resolved_at: str
+) -> None:
+    """The LLM's own heat-level flags (source='extraction', sublot_id=
+    None) can never be corrected directly when they concern origin data
+    — see _ORIGIN_FIELD_MARKERS above — and the LLM's flag schema can't
+    attach a sublot_id to its own flags in the first place (sub-lot rows
+    don't have ids yet at the point extraction runs — see
+    review_flags.py). Without this, such a flag could stay open forever
+    even after the real, underlying compliance problem was fixed: it's
+    blocking severity (compliance_violation), so a heat could become
+    permanently unissuable with no path forward for a reviewer, despite
+    having genuinely fixed the data.
+
+    The compliance_engine's own per-sub-lot check is the actual,
+    resolvable, authoritative signal for this concern — deterministic,
+    freshly re-evaluated on every correction. Once every sub-lot is
+    clear of an open compliance_engine flag, the LLM's own aggregate
+    observation about the same topic is, by definition, no longer true,
+    so it's marked resolved too. Safe in both directions: this only
+    ever transitions open -> resolved, never the reverse, so if a later
+    correction reintroduces a bad origin, the compliance_engine's own
+    fresh sub-lot flag reopens the gate independently (_append_fresh_
+    flags appends a new open flag rather than un-resolving this one) —
+    this resolution doesn't create a hole, it just stops a dead end."""
+    all_sublots_clear = not any(
+        f.get("status", "open") == "open" and f.get("source") == "compliance_engine"
+        for flags in all_sublot_flags
+        for f in flags
+    )
+    if not all_sublots_clear:
+        return
+    for f in heat_flags:
+        if (
+            f.get("source") == "extraction"
+            and f.get("sublot_id") is None
+            and f.get("status", "open") == "open"
+            and _is_origin_related_field_name(f.get("field_name"))
+        ):
+            f["status"] = "resolved"
+            f["resolved_by"] = actor
+            f["resolved_at"] = resolved_at
+
+
 def _resolve_open_sublot_duplicate_flags(
     heat_flags: list[dict], field_name: str, sublot_id: str, actor: str, resolved_at: str
 ) -> bool:
@@ -745,14 +805,21 @@ def review_heat(
     existing_flags = json.loads(heat["flags_json"])
     existing_heat_level_flags = [f for f in existing_flags if not f.get("sublot_id")]
     heat_flags = existing_heat_level_flags + [f for flist in sublot_flag_lists for f in flist]
+    reviewed_at = now_iso()
+    # A heat-level extraction flag about origin data (see
+    # _resolve_heat_level_origin_flags_if_all_sublots_clear) has no
+    # direct correction path of its own -- if every sub-lot submitted in
+    # this review is clean, resolve it here too, not just when a later
+    # /correct call touches a sub-lot. Otherwise a reviewer who fixes a
+    # sub-lot's origin directly in this form (rather than via the
+    # correction panel afterward) would hit the same dead end.
+    _resolve_heat_level_origin_flags_if_all_sublots_clear(heat_flags, sublot_flag_lists, current_user["email"], reviewed_at)
     # _any_open, not bool(heat_flags): a preserved heat-level flag can be
     # resolved (its status carried over as-is from the row above), so the
     # list being non-empty no longer means there's an open issue — unlike
     # before this fix, when heat_flags only ever held freshly-computed
     # sub-lot flags, which are always open by construction.
     still_flagged = _any_open(heat_flags)
-
-    reviewed_at = now_iso()
     # Compare-and-swap, not a blind UPDATE: `reviewed = 0` blocks a second
     # concurrent /review submission on the same heat from also winning
     # (both would otherwise read reviewed=0 before either commits and
@@ -987,9 +1054,14 @@ def correct_field(
             _append_fresh_flags(heat_flags, fresh_flags, match_sublot=True)
 
             all_sublot_rows = conn.execute("SELECT flags_json FROM heat_sublots WHERE heat_id = ?", (heat_id,)).fetchall()
-            heat_still_flagged = _any_open(_heat_own_flags(heat_flags)) or any(
-                _any_open(json.loads(r["flags_json"])) for r in all_sublot_rows
-            )
+            all_sublot_flags = [json.loads(r["flags_json"]) for r in all_sublot_rows]
+            # See _resolve_heat_level_origin_flags_if_all_sublots_clear:
+            # a heat-level extraction flag about origin data has no
+            # direct correction of its own -- this is what stops it from
+            # staying open (and blocking issuance) forever after the
+            # real sub-lot data has been fixed.
+            _resolve_heat_level_origin_flags_if_all_sublots_clear(heat_flags, all_sublot_flags, actor, corrected_at)
+            heat_still_flagged = _any_open(_heat_own_flags(heat_flags)) or any(_any_open(flags) for flags in all_sublot_flags)
             heat_cas = conn.execute(
                 "UPDATE document_heats SET source = 'human', flags_json = ?, flagged_for_review = ? WHERE id = ? AND flags_json = ?",
                 (json.dumps(heat_flags), 1 if heat_still_flagged else 0, heat_id, current_heat["flags_json"]),

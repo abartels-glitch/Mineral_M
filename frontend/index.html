@@ -175,6 +175,14 @@
     return el("ul", { class: "flag-list" }, items);
   }
 
+  // Must stay in sync with main.py's _HEAT_CORRECTABLE_FIELDS keys --
+  // there's no shared config layer between the two in this no-build-step
+  // app, same as every other cross-boundary constant here.
+  const HEAT_CORRECTABLE_FIELDS = ["heat_id", "mass_kg", "alloy_composition", "test_results"];
+  // Mirrors main.py's _ORIGIN_FIELD_MARKERS.
+  const ORIGIN_FIELD_MARKERS = ["origin_country", "origin_confidence"];
+  const isOriginRelatedFieldName = (fieldName) => !!fieldName && ORIGIN_FIELD_MARKERS.some((m) => fieldName.includes(m));
+
   // Compact form for correcting exactly the fields something flagged —
   // separate from the big "Submit review" form below, and (unlike that
   // form) usable regardless of whether the heat is locked, since a
@@ -195,74 +203,99 @@
     container.appendChild(el("h4", { text: "Correct flagged fields", style: "margin: 0 0 0.4rem 0; font-size: 0.85rem" }));
 
     for (const { target, sublot, flag } of targets) {
-      const currentValue = target === "heat" ? heat[flag.field_name] : sublot[flag.field_name];
       const label = target === "sublot" ? `Sub-lot ${sublot.sublot_id || sublot.id.slice(0, 6)} · ${flag.field_name}` : flag.field_name;
 
-      // Structured (object-shaped) fields. alloy_composition/test_results
-      // are the two the backend actually supports correcting in place
-      // (main.py's _HEAT_CORRECTABLE_FIELDS) — real editable sub-forms,
-      // reusing the Found section's flat key/value editor for the former
-      // and a purpose-built one for the latter's one-level-deeper shape.
-      // Anything else object/array-shaped (e.g. nonconformance_refs, or
-      // an unexpected field_name) has no allowlisted column to save
-      // against, so it keeps the original locked read-only view + note
-      // instead of offering a save button that would just 400 — this is
-      // also what used to render the raw value as literal
-      // "[object Object]" before that display-layer fix.
-      if (currentValue !== null && typeof currentValue === "object") {
-        if (flag.field_name === "alloy_composition" || flag.field_name === "test_results") {
-          const editor =
-            flag.field_name === "alloy_composition"
-              ? buildKeyValueEditor(currentValue, false)
-              : buildTestResultsEditor(currentValue, false);
-          const saveBtn = el("button", {
-            class: "icon-btn",
-            type: "button",
-            text: "Save correction",
-            onclick: async () => {
-              statusEl.textContent = "";
-              try {
-                await apiFetch(`/documents/${doc.id}/heats/${heat.id}/correct`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    target,
-                    sublot_id: target === "sublot" ? sublot.id : null,
-                    field_name: flag.field_name,
-                    corrected_value: editor.getValue(),
-                  }),
-                });
-                await onSaved();
-              } catch (err) {
-                statusEl.textContent = err.message;
-              }
-            },
-          });
-          container.appendChild(
-            el("div", { class: "correction-row" }, [
-              el("span", { class: "correction-label", text: label }),
-              el("span", { class: "muted", text: flag.human_readable_reason }),
-            ])
-          );
-          container.appendChild(editor.container);
-          container.appendChild(saveBtn);
-          continue;
-        }
-
+      // heat.flags (main.py's HeatOut.flags) mixes three things: the
+      // heat's own extraction-level observations, AND a flattened
+      // duplicate of every sub-lot's compliance_engine flag (see
+      // main.py's upload_document) -- this loop's `target: "heat"`
+      // covers ALL of heat.flags, not just genuinely heat-scoped
+      // entries, so a naive "every heat-target flag gets a heat-level
+      // save button" used to offer a working-looking button for two
+      // cases that always 400: a flattened sub-lot duplicate (real
+      // fix lives on the sub-lot itself, rendered separately below),
+      // and an LLM-phrased field_name (sometimes an indexed/compound
+      // path) that was never a real correctable column at all.
+      if (target === "heat" && flag.sublot_id) {
         container.appendChild(
           el("div", { class: "correction-row" }, [
             el("span", { class: "correction-label", text: label }),
             el("span", { class: "muted", text: flag.human_readable_reason }),
           ])
         );
-        container.appendChild(buildKeyValueEditor(currentValue, true).container);
+        container.appendChild(
+          el("p", { class: "muted", style: "margin: 0 0 0.6rem 0; font-size: 0.75rem" }, [
+            document.createTextNode("Resolved automatically when you correct the matching sub-lot below."),
+          ])
+        );
+        continue;
+      }
+      if (target === "heat" && !HEAT_CORRECTABLE_FIELDS.includes(flag.field_name)) {
+        container.appendChild(
+          el("div", { class: "correction-row" }, [
+            el("span", { class: "correction-label", text: label }),
+            el("span", { class: "muted", text: flag.human_readable_reason }),
+          ])
+        );
         container.appendChild(
           el("p", { class: "muted", style: "margin: 0 0 0.6rem 0; font-size: 0.75rem" }, [
             document.createTextNode(
-              "Per-field correction for this field isn't available yet — edit it in the Found section below and submit the review to update it."
+              isOriginRelatedFieldName(flag.field_name)
+                ? "This concerns a sub-lot's origin — correct it in the sub-lot table below; it resolves automatically once every sub-lot's origin is compliant."
+                : "This field doesn't have a direct correction here — review it in the Found section below and submit a review once the data looks right."
             ),
           ])
         );
+        continue;
+      }
+
+      const currentValue = target === "heat" ? heat[flag.field_name] : sublot[flag.field_name];
+
+      // Structured (object-shaped) fields. By this point target="heat"
+      // flags are guaranteed to have a field_name in
+      // HEAT_CORRECTABLE_FIELDS (the two filters above already routed
+      // everything else to a read-only explanation) — alloy_composition
+      // and test_results are the object-shaped members of that set, real
+      // editable sub-forms reusing the Found section's flat key/value
+      // editor for the former and a purpose-built one for the latter's
+      // one-level-deeper shape. target="sublot" fields are always
+      // scalar, so this never applies to them.
+      if (currentValue !== null && typeof currentValue === "object") {
+        const editor =
+          flag.field_name === "alloy_composition"
+            ? buildKeyValueEditor(currentValue, false)
+            : buildTestResultsEditor(currentValue, false);
+        const saveBtn = el("button", {
+          class: "icon-btn",
+          type: "button",
+          text: "Save correction",
+          onclick: async () => {
+            statusEl.textContent = "";
+            try {
+              await apiFetch(`/documents/${doc.id}/heats/${heat.id}/correct`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  target,
+                  sublot_id: target === "sublot" ? sublot.id : null,
+                  field_name: flag.field_name,
+                  corrected_value: editor.getValue(),
+                }),
+              });
+              await onSaved();
+            } catch (err) {
+              statusEl.textContent = err.message;
+            }
+          },
+        });
+        container.appendChild(
+          el("div", { class: "correction-row" }, [
+            el("span", { class: "correction-label", text: label }),
+            el("span", { class: "muted", text: flag.human_readable_reason }),
+          ])
+        );
+        container.appendChild(editor.container);
+        container.appendChild(saveBtn);
         continue;
       }
 

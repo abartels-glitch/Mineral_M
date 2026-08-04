@@ -203,12 +203,10 @@ test("test_results row with an unexpected shape renders read-only instead of gue
 
 test("a still-unsupported list field (nonconformance_refs) keeps the read-only redirect fallback", () => {
   // nonconformance_refs is a list of strings (llm_extractor.HEAT_SCHEMA),
-  // not a dict -- but typeof [] === "object" in JS, so it still hits the
-  // same branch as alloy_composition/test_results here. There's no
-  // allowlisted backend column for it (main.py's _HEAT_CORRECTABLE_FIELDS
-  // has no list-shaped entries -- neither editor built this pass fits a
-  // bare string list), so it must keep the read-only fallback rather than
-  // a save button that would just 400.
+  // not a dict, and isn't in HEAT_CORRECTABLE_FIELDS -- the field_name
+  // allowlist check (not object-shape detection) routes it to a
+  // read-only explanation before a save button that would just 400
+  // ever gets a chance to render.
   const window = loadPageFunctions("index.html");
   const heat = {
     id: "heat-1",
@@ -231,7 +229,71 @@ test("a still-unsupported list field (nonconformance_refs) keeps the read-only r
   assert.ok(container);
   assert.ok(!container.innerHTML.includes("[object Object]"));
   assert.ok(!container.innerHTML.includes("Save correction"), "no allowlisted column for this field -- must not offer a save button");
-  assert.ok(container.innerHTML.includes("isn't available yet"));
+  assert.ok(container.innerHTML.includes("doesn't have a direct correction here"));
+});
+
+test("a flattened duplicate of a sub-lot's compliance flag renders read-only, pointing at the sub-lot", () => {
+  // heat.flags (main.py's HeatOut.flags) includes a flattened copy of
+  // every sub-lot's own compliance_engine flag, alongside the heat's
+  // own extraction-level ones -- this copy carries a real sublot_id
+  // even though it appears in heat.flags, which used to make the panel
+  // offer a heat-level save button for it that always 400'd (the real
+  // fix lives on the sub-lot's own flag, rendered separately below).
+  const window = loadPageFunctions("index.html");
+  const heat = {
+    id: "heat-1",
+    sublots: [],
+    flags: [
+      {
+        issue_type: "compliance_violation",
+        field_name: "origin_country",
+        severity: "blocking",
+        human_readable_reason: "origin country 'China' is FEOC-covered",
+        source: "compliance_engine",
+        status: "open",
+        sublot_id: "sublot-1",
+      },
+    ],
+  };
+  const statusEl = window.document.createElement("p");
+  const container = window.renderCorrectionPanel({ id: "doc-1" }, heat, statusEl, async () => {});
+
+  assert.ok(container);
+  assert.ok(!container.innerHTML.includes("Save correction"), "the flattened duplicate must not offer its own save button");
+  assert.ok(container.innerHTML.includes("Resolved automatically when you correct the matching sub-lot below"));
+});
+
+test("an unresolved heat-level origin flag (sublot_id null) points at the sub-lot table, not a dead-end save button", () => {
+  // The LLM's own heat-level flag about origin data (sublot_id=null,
+  // source="extraction") -- distinct from the previous test's flattened
+  // compliance_engine duplicate. No direct heat-level correction exists
+  // for it (origin is inherently per-sub-lot), but unlike a genuinely
+  // unmappable field, this one gets its own, more specific explanation
+  // pointing at where the real fix happens, since it resolves
+  // automatically (main.py's _resolve_heat_level_origin_flags_if_all_
+  // sublots_clear) once every sub-lot is compliant.
+  const window = loadPageFunctions("index.html");
+  const heat = {
+    id: "heat-1",
+    sublots: [],
+    flags: [
+      {
+        issue_type: "compliance_violation",
+        field_name: "feedstock_sublots[0].origin_country", // LLM phrasing variant, not the plain name
+        severity: "blocking",
+        human_readable_reason: "Covered country China appears as origin of feedstock material.",
+        source: "extraction",
+        status: "open",
+        sublot_id: null,
+      },
+    ],
+  };
+  const statusEl = window.document.createElement("p");
+  const container = window.renderCorrectionPanel({ id: "doc-1" }, heat, statusEl, async () => {});
+
+  assert.ok(container);
+  assert.ok(!container.innerHTML.includes("Save correction"));
+  assert.ok(container.innerHTML.includes("concerns a sub-lot's origin"));
 });
 
 test("scalar flagged field (heat_id) still renders a normal editable input and a working save button", () => {

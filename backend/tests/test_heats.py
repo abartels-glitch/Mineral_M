@@ -584,6 +584,120 @@ def test_credential_issue_requires_no_open_blocking_flag(client, conn):
     assert allowed.status_code == 200, allowed.text
 
 
+def test_correcting_the_only_sublot_also_resolves_the_llms_own_heat_level_origin_flag(client, conn, monkeypatch):
+    """Reproduces the exact dead end found in the demo-readiness live
+    walkthrough against a real Claude Haiku extraction: the LLM's own
+    heat-level flag ("field_name": "origin_country", source="extraction",
+    sublot_id=None -- the LLM's flag schema can never attach a sublot_id
+    to its own flags, sub-lot rows don't have ids yet at extraction
+    time) has no direct correction path of its own. Before this fix,
+    correcting the sub-lot's real compliance_engine flag left this
+    second, separate flag open forever -- fully_addressed stayed False
+    and the issuance gate permanently refused the heat, even though the
+    actual compliance problem was genuinely fixed."""
+
+    def fake_extract_structured(raw_text):
+        return {
+            "certificate_id": "RGM-CERT-DEADEND",
+            "supplier_id": "Rio Grande Magnetics, LLC",
+            "signatures": [],
+            "heats": [
+                {
+                    "heat_id": "RGM-DEADEND-1",
+                    "alloy_composition": {"Nd": 29.5, "Fe": 68.2, "B": 1.0},
+                    "test_results": None,
+                    "nonconformance_refs": [],
+                    "feedstock_sublots": [
+                        {
+                            "sublot_id": None,
+                            "blend_pct": 100.0,
+                            "origin_country": "China",
+                            "origin_confidence": "high",
+                            "notes": None,
+                        }
+                    ],
+                    "segregation_attested": True,
+                    "segregation_note": "Dedicated line.",
+                    "mass_kg": 200.0,
+                    "confidence": 0.95,
+                    "flags": [
+                        {
+                            "issue_type": "compliance_violation",
+                            "field_name": "origin_country",
+                            "severity": "blocking",
+                            "human_readable_reason": "China is a covered country and appears as the origin.",
+                            "source": "extraction",
+                            "status": "open",
+                            "resolved_by": None,
+                            "resolved_at": None,
+                            "sublot_id": None,
+                        }
+                    ],
+                    "source": "llm",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(llm_extractor, "extract_structured", fake_extract_structured)
+    _login_org_user(client, conn)
+    upload = client.post(
+        "/documents/upload",
+        files={"file": ("covered.txt", b"irrelevant, extraction is mocked", "text/plain")},
+        data={"document_type": "mtr_coc"},
+    ).json()
+    doc_id = upload["id"]
+    heat = upload["heats"][0]
+    heat_id = heat["id"]
+    sublot_id = heat["sublots"][0]["id"]
+
+    # Confirmed shape: two independent open compliance_violation flags,
+    # one heat-level (the LLM's own), one sub-lot-level (the
+    # deterministic compliance_engine check) -- exactly what the real
+    # LLM produced live.
+    heat_level_flag = next(f for f in heat["flags"] if f["sublot_id"] is None)
+    sublot_level_flag = heat["sublots"][0]["flags"][0]
+    assert heat_level_flag["source"] == "extraction"
+    assert heat_level_flag["field_name"] == "origin_country"
+    assert heat_level_flag["status"] == "open"
+    assert sublot_level_flag["source"] == "compliance_engine"
+    assert sublot_level_flag["status"] == "open"
+
+    client.post(
+        f"/documents/{doc_id}/heats/{heat_id}/review",
+        json={
+            "heat_id": "RGM-DEADEND-1",
+            "mass_kg": 200.0,
+            "sublots": [{"id": sublot_id, "origin_country": "China", "origin_confidence": "high", "blend_pct": 100.0}],
+        },
+    )
+
+    # Fix the real, underlying problem -- the only thing a reviewer can
+    # actually correct here.
+    corrected = client.post(
+        f"/documents/{doc_id}/heats/{heat_id}/correct",
+        json={"target": "sublot", "sublot_id": sublot_id, "field_name": "origin_country", "corrected_value": "United States"},
+    ).json()
+
+    sublot_flag_after = next(f for f in corrected["sublots"][0]["flags"] if f["issue_type"] == "compliance_violation")
+    assert sublot_flag_after["status"] == "resolved"
+    heat_level_flag_after = next(f for f in corrected["flags"] if f["sublot_id"] is None)
+    assert heat_level_flag_after["status"] == "resolved", (
+        "the LLM's own heat-level flag must resolve once every sub-lot is clear, not stay open forever"
+    )
+    assert corrected["fully_addressed"] is True
+
+    issued = client.post(
+        "/credentials/issue",
+        json={
+            "credential_type": "collected_scrap_lot",
+            "heat_id": heat_id,
+            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
+            "sources": [],
+        },
+    )
+    assert issued.status_code == 200, issued.text
+
+
 def test_extraction_stats_reflects_flagged_and_reviewed(client, conn):
     make_user(conn, "admin@example.com", "pw", "platform_admin")
     _login_org_user(client, conn)
