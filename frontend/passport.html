@@ -190,7 +190,7 @@
           el("td", { text: entry.created_at }),
           el("td", { text: entry.action }),
           el("td", { text: entry.actor }),
-          el("td", { text: Object.keys(entry.detail).length ? JSON.stringify(entry.detail) : "—" }),
+          el("td", { text: formatAuditDetail(entry.detail) }),
         ])
       );
     }

@@ -103,6 +103,26 @@ function renderUserHeader(user) {
   nav.appendChild(logout);
 }
 
+// Light formatting for an audit_log entry's detail object, used by both
+// index.html's correction history and passport.html's Timeline --
+// avoids dumping raw JSON syntax (braces, quoted keys) in front of a
+// logged-in reviewer/auditor. Not a full renderer: detail shapes vary
+// per action, so a nested object/array value still falls back to
+// JSON.stringify for itself rather than trying to format every
+// possible shape specifically.
+function formatAuditDetail(detail) {
+  const keys = Object.keys(detail || {});
+  if (!keys.length) return "—";
+  return keys
+    .map((k) => {
+      const value = detail[k];
+      const formatted =
+        value === null || value === undefined ? "—" : typeof value === "object" ? JSON.stringify(value) : String(value);
+      return `${k.replace(/_/g, " ")}: ${formatted}`;
+    })
+    .join("; ");
+}
+
 function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
