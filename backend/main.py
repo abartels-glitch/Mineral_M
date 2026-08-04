@@ -1495,7 +1495,17 @@ def get_passport(lookup_key: str, conn=Depends(get_db)):
         conn, "credential", credential_id, "passport_viewed", actor="unauthenticated",
         detail={"is_legacy": True} if is_legacy else {},
     )
-    return PassportResult(**result)
+    # Narrow SELECTs, same discipline as passport.py's own issuer lookup --
+    # these two columns feed the Attestation Block's display only, nothing
+    # here participates in the verdict compile_passport already produced.
+    cred_row = conn.execute("SELECT issuer_id, signature FROM credentials WHERE id = ?", (credential_id,)).fetchone()
+    issuer_name = None
+    signature = None
+    if cred_row is not None:
+        signature = cred_row["signature"]
+        issuer_row = conn.execute("SELECT name FROM issuers WHERE id = ?", (cred_row["issuer_id"],)).fetchone()
+        issuer_name = issuer_row["name"] if issuer_row else None
+    return PassportResult(**result, issuer_name=issuer_name, signature=signature)
 
 
 def _revocation_reason(conn, credential_id: str) -> Optional[str]:

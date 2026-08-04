@@ -170,6 +170,13 @@ class PassportResult(BaseModel):
     verdict: NodeStatus
     reasons: list[str]
     nodes: list[PassportNodeResult]
+    # Additive, read-only fields for the Attestation Block on passport.html
+    # -- the root credential's issuer name and signature, neither of which
+    # compile_passport's verdict logic needs or touches. Null if the root
+    # credential/issuer row is missing (see PassportNodeResult's own
+    # "referenced credential id does not exist" case).
+    issuer_name: Optional[str] = None
+    signature: Optional[str] = None
 
 
 class LoginRequest(BaseModel):
