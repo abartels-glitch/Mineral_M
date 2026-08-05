@@ -132,7 +132,14 @@ CREATE TABLE IF NOT EXISTS credentials (
     signature TEXT NOT NULL,
     superseded_by TEXT REFERENCES credentials(id),
     revoked_at TEXT,
-    issued_at TEXT NOT NULL
+    issued_at TEXT NOT NULL,
+    -- Which issuer_keys row signed this credential. No composite FK here
+    -- (SQLite's ALTER TABLE ADD COLUMN can't express one against
+    -- issuer_keys' composite (issuer_id, key_id) primary key, which is
+    -- why the pre-existing-DB migration below adds this column the same
+    -- unenforced way) -- verification fails closed on a missing/invalid
+    -- key_id regardless (see passport.py's _evaluate_node).
+    key_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS uii_bindings (
@@ -152,6 +159,40 @@ CREATE TABLE IF NOT EXISTS audit_log (
     created_at TEXT NOT NULL
 );
 """
+
+# Split out from the main SCHEMA string so the migration test can create
+# just this table on top of a hand-rolled pre-migration schema, without
+# re-running every other CREATE TABLE IF NOT EXISTS above.
+#
+# valid_to/revoked_at are deliberately separate columns, not one: the
+# same distinction the codebase already draws between
+# credentials.superseded_by (routine, no wrongdoing implied) and
+# credentials.revoked_at (an explicit retraction) -- valid_to closes
+# when a newer key supersedes this one via ordinary rotation,
+# revoked_at is set only when this specific key is reported compromised.
+# Conflating them would make routine rotation look identical to a
+# compromise event.
+#
+# The unique partial index is the DB-level guard against a rotation bug
+# leaving two simultaneously-"active" keys for one issuer -- enforced
+# by SQLite itself, not just application-level care.
+ISSUER_KEYS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS issuer_keys (
+    issuer_id TEXT NOT NULL REFERENCES issuers(id),
+    key_id TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    valid_from TEXT NOT NULL,
+    valid_to TEXT,
+    revoked_at TEXT,
+    registered_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (issuer_id, key_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_key_per_issuer
+    ON issuer_keys(issuer_id) WHERE valid_to IS NULL;
+"""
+
+SCHEMA = SCHEMA + ISSUER_KEYS_TABLE_SQL
 
 
 def get_connection() -> sqlite3.Connection:
@@ -244,6 +285,52 @@ def _migrate_issuers_uii_fields(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE issuers ADD COLUMN enterprise_id TEXT")
 
 
+# The sentinel key_id every pre-existing (platform-generated,
+# platform-held) issuer key and credential gets backfilled to below --
+# same "tag it, don't reinterpret or silently break it" approach as
+# uii.py's is_legacy fallback, just a literal stored value instead of a
+# boolean, since verification needs something to actually look up.
+LEGACY_KEY_ID = "legacy-platform-held"
+
+
+def _migrate_issuer_keys(conn: sqlite3.Connection) -> None:
+    """CREATE TABLE IF NOT EXISTS creates issuer_keys fresh on a new DB
+    but doesn't backfill anything into it, and doesn't touch existing
+    credentials rows either — a pre-migration DB only has
+    issuers.public_key/private_key_path (the one platform-generated,
+    platform-held key an issuer has had for life) with no corresponding
+    issuer_keys row and no credentials.key_id pointing at one.
+
+    Synthesizes exactly one legacy-platform-held key per existing
+    issuer (a frozen copy of issuers.public_key, valid from that
+    issuer's own created_at, never superseded or revoked) and backfills
+    every existing credential to point at it. issuers.public_key/
+    private_key_path are never written to again after this migration —
+    issuer_keys is the sole source of truth for all key lookups (new
+    and historical) from here on.
+
+    Idempotent: INSERT OR IGNORE on the (issuer_id, key_id) primary key
+    means re-running this on every process start (same as every other
+    _migrate_* function) never creates a second legacy row, and the
+    credentials backfill only ever touches rows that still have
+    key_id IS NULL."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(credentials)")}
+    if "key_id" not in cols:
+        conn.execute("ALTER TABLE credentials ADD COLUMN key_id TEXT")
+
+    for issuer in conn.execute("SELECT id, public_key, created_at FROM issuers"):
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO issuer_keys
+                (issuer_id, key_id, public_key, valid_from, valid_to, revoked_at, registered_by, created_at)
+            VALUES (?, ?, ?, ?, NULL, NULL, 'migration', ?)
+            """,
+            (issuer["id"], LEGACY_KEY_ID, issuer["public_key"], issuer["created_at"], issuer["created_at"]),
+        )
+
+    conn.execute("UPDATE credentials SET key_id = ? WHERE key_id IS NULL", (LEGACY_KEY_ID,))
+
+
 def init_db() -> None:
     conn = get_connection()
     try:
@@ -251,6 +338,7 @@ def init_db() -> None:
         _migrate_flags_json(conn)
         _migrate_credentials_heat_id(conn)
         _migrate_issuers_uii_fields(conn)
+        _migrate_issuer_keys(conn)
         conn.commit()
     finally:
         conn.close()
