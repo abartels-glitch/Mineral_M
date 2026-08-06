@@ -70,6 +70,7 @@ function renderHeader() {
     { href: "/index.html", text: "Review queue" },
     { href: "/passport.html", text: "Passport lookup" },
     { href: "/scan.html", text: "Scan" },
+    { href: "/keys.html", text: "Signing key" },
   ];
   root.appendChild(el("h1", { text: "FEOC Compliance Passport (MVP)" }));
   root.appendChild(

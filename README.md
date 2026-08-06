@@ -19,7 +19,7 @@ with a real design partner before a real pilot.
 
 | Decision | MVP call | Upgrade path |
 |---|---|---|
-| **Key custody** | Platform holds issuer private keys — one Ed25519 keypair per organization, unencrypted PEM under `data/keys/` | Move to supplier-held keys or HSM-backed platform custody before handling real supplier trust relationships |
+| **Key custody** | Client-side, org-controlled: each org generates its own Ed25519 keypair in-browser (Web Crypto, non-extractable private key, IndexedDB-persisted) — the platform never sees or stores a private key. Keys are versioned (`issuer_keys`, one row per key with a validity window) so rotation doesn't retroactively invalidate credentials signed under a prior key; revocation is retroactive (flags every credential that key ever signed). First-key registration is `platform_admin`-witnessed (same checkpoint as org onboarding); rotation after that is self-service by the org's own account. | Move to hardware-backed custody (WebAuthn/FIDO2 security keys or an org-side HSM) before handling real supplier trust relationships — a compromised browser profile today still means a compromised key, just no longer a platform-wide one |
 | **Document scope** | One document type: certificate of conformance / MTR. A certificate can cover one heat/melt (the common case) or several (a consolidated multi-heat certificate) — each heat is extracted, reviewed, and can become its own credential independently. Tightened after testing against `rio_grande_mtr_complex.pdf` (see below): single-heat is the working regression bar, multi-heat is the stretch target. | Add document *types* (not just heat counts) once the first one is proven against a real sample |
 | **Segregation enforcement** | Self-reported, but with a floor: `segregation_attested` (bool) + `segregation_attested_by` (named person) + `segregation_note` (control description). No third-party evidence yet. | Add evidence upload (photos, process logs) and eventually third-party audit |
 | **Materials scope** | Compliance engine only checks the actual DFARS rare-earth scope: samarium-cobalt magnets, NdFeB magnets, tantalum, tungsten. Anything else yields `insufficient_data`, not a silent pass. | Don't let product language ("motors, batteries, ESCs") outrun this without extending the engine first |
@@ -278,10 +278,14 @@ pytest                         # passport/auth/extraction logic, fully offline �
 ```
 
 Open `http://localhost:8000/login.html` and log in with the `org_user`
-dev account above to upload a document and walk the upload → review →
-issue flow. Open `http://localhost:8000/passport.html` and look up the
-credential id printed by `seed.py` — no login needed — to see a full
-passport compile.
+dev account above. `seed.py`'s demo credential was signed under a
+legacy platform-held key (pre-dating client-side custody), which this
+browser has no local private key for — visit `keys.html` first and
+generate/register a new signing key for the org, then upload a document
+and walk the upload → review → issue flow; issuance signs locally with
+that browser-resident key. Open `http://localhost:8000/passport.html`
+and look up the credential id printed by `seed.py` — no login needed —
+to see a full passport compile.
 
 ## Not built yet
 

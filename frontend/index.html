@@ -47,10 +47,12 @@
 </main>
 
 <script src="/app.js"></script>
+<script src="/signing.js"></script>
 <script>
   let documents = [];
   let credentials = [];
   let selectedDocumentId = null;
+  let currentUser = null;
 
   async function refreshAll() {
     documents = await apiFetch("/documents");
@@ -878,11 +880,114 @@
     }
 
     const resultEl = el("p", {});
+    const confirmZone = el("div", { class: "rq-confirm-zone", style: "display: none" });
+
+    // Finishes the two-phase, client-signed flow started once the org
+    // user has reviewed the confirmation screen below: fetch the
+    // opaque bytes to sign from /credentials/issue/prepare, sign them
+    // locally with the browser's own non-extractable Ed25519 key (never
+    // reconstructing the payload client-side, per the two-phase
+    // design), then submit the signature.
+    async function signAndIssue(body) {
+      const issuerId = currentUser.org_id;
+      const record = await getStoredKeyRecord(issuerId);
+      if (!record || !record.keyId) {
+        throw new Error(
+          "No registered signing key for this organization in this browser. Register one on the Signing key page first."
+        );
+      }
+      const prepared = await apiFetch("/credentials/issue/prepare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const signatureB64 = await signBytesB64(record.privateKey, prepared.signable_bytes_b64);
+      return apiFetch("/credentials/issue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...body,
+          credential_id: prepared.credential_id,
+          issued_at: prepared.issued_at,
+          key_id: record.keyId,
+          signature_b64: signatureB64,
+        }),
+      });
+    }
+
+    function showConfirmation(body) {
+      confirmZone.innerHTML = "";
+      confirmZone.style.display = "block";
+      const fields = [
+        ["Credential type", body.credential_type],
+        ["Material type", body.subject.material_type],
+        ["Origin country", body.subject.origin_country],
+        ["Mass (kg)", body.subject.mass_kg],
+        ["Heat number", body.subject.heat_number],
+        ["Supplier name", body.subject.supplier_name],
+        ["Source credentials", body.sources.length ? body.sources.join(", ") : "(none)"],
+        ["Segregation attested", body.segregation_attested ? "yes" : "no"],
+      ];
+      const dl = el(
+        "dl",
+        { class: "rq-gate-fields" },
+        fields.flatMap(([label, value]) => [el("dt", { text: label }), el("dd", { text: String(value ?? "—") })])
+      );
+      confirmZone.append(
+        el("div", { class: "rq-zone-title", text: "Confirm before signing" }),
+        el("p", { class: "muted", text: "This is exactly what will be signed with this browser's org key. Check it, then confirm to sign and submit." }),
+        dl
+      );
+      const confirmBtn = el("button", {
+        class: "rq-submit-btn",
+        text: "Confirm & sign",
+        onclick: async () => {
+          resultEl.innerHTML = "";
+          try {
+            const cred = await signAndIssue(body);
+            confirmZone.style.display = "none";
+            resultEl.appendChild(el("span", { class: "success", text: `Issued credential ${cred.id}. ` }));
+            resultEl.appendChild(el("a", { href: `/passport.html?id=${cred.id}`, text: "View passport →" }));
+            resultEl.appendChild(
+              el("div", {}, [
+                el("label", { text: "Data Matrix (scan to open this passport)" }),
+                el("div", { class: "rq-datamatrix-tag" }, [
+                  el("img", { src: `/credentials/${cred.id}/uii/image`, alt: `Data Matrix for credential ${cred.id}` }),
+                ]),
+              ])
+            );
+            credentials = await apiFetch("/credentials");
+            await refreshAll();
+            const updatedDoc = await apiFetch(`/documents/${doc.id}`);
+            await renderDocumentPanel(updatedDoc);
+          } catch (err) {
+            resultEl.appendChild(el("span", { class: "error", text: err.message }));
+          }
+        },
+      });
+      const cancelBtn = el("button", {
+        class: "icon-btn",
+        type: "button",
+        text: "Cancel",
+        onclick: () => {
+          confirmZone.style.display = "none";
+          confirmZone.innerHTML = "";
+        },
+      });
+      confirmZone.append(confirmBtn, cancelBtn);
+    }
 
     const submitBtn = el("button", {
       class: "rq-submit-btn",
       text: "Issue credential",
       onclick: async () => {
+        resultEl.innerHTML = "";
+        if (!(await isEd25519Supported())) {
+          resultEl.appendChild(
+            el("span", { class: "error", text: "This browser doesn't support Ed25519 signing — update to a current Chrome/Edge/Firefox/Safari to issue credentials." })
+          );
+          return;
+        }
         const sources = Array.from(container.querySelectorAll(".source-checkbox:checked")).map((c) => c.value);
         const body = {
           credential_type: credentialType.value,
@@ -899,31 +1004,7 @@
           segregation_attested_by: segByInput.value || null,
           segregation_note: segNoteInput.value || null,
         };
-        try {
-          const cred = await apiFetch("/credentials/issue", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-          });
-          resultEl.innerHTML = "";
-          resultEl.appendChild(el("span", { class: "success", text: `Issued credential ${cred.id}. ` }));
-          resultEl.appendChild(el("a", { href: `/passport.html?id=${cred.id}`, text: "View passport →" }));
-          resultEl.appendChild(
-            el("div", {}, [
-              el("label", { text: "Data Matrix (scan to open this passport)" }),
-              el("div", { class: "rq-datamatrix-tag" }, [
-                el("img", { src: `/credentials/${cred.id}/uii/image`, alt: `Data Matrix for credential ${cred.id}` }),
-              ]),
-            ])
-          );
-          credentials = await apiFetch("/credentials");
-          await refreshAll();
-          const updatedDoc = await apiFetch(`/documents/${doc.id}`);
-          await renderDocumentPanel(updatedDoc);
-        } catch (err) {
-          resultEl.innerHTML = "";
-          resultEl.appendChild(el("span", { class: "error", text: err.message }));
-        }
+        showConfirmation(body);
       },
     });
 
@@ -938,6 +1019,7 @@
       el("div", {}, sourceCheckboxes.length ? sourceCheckboxes : [el("p", { class: "muted", text: "No existing credentials yet." })]),
       segregationBlock,
       submitBtn,
+      confirmZone,
       resultEl
     );
 
@@ -945,7 +1027,7 @@
   }
 
   (async () => {
-    const user = await requireAuth(["org_user", "platform_admin"]);
-    if (user) await refreshAll();
+    currentUser = await requireAuth(["org_user", "platform_admin"]);
+    if (currentUser) await refreshAll();
   })();
 </script>

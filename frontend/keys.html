@@ -1,0 +1,193 @@
+<title>Signing Key — FEOC Compliance Passport</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="/style.css" />
+<link rel="stylesheet" href="/passport.css" />
+<link rel="stylesheet" href="/review.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700;800&display=swap"
+  rel="stylesheet"
+/>
+<style>
+  .key-fields { display: grid; grid-template-columns: auto 1fr; gap: 0.4rem 1.2rem; margin: 0 0 1rem 0; }
+  .key-fields dt {
+    font-family: "IBM Plex Mono", monospace; font-size: 0.68rem; font-weight: 600;
+    letter-spacing: 0.05em; text-transform: uppercase; color: var(--slate); margin: 0;
+  }
+  .key-fields dd { font-family: "IBM Plex Mono", monospace; font-size: 0.85rem; margin: 0; word-break: break-word; }
+  .key-status-pill {
+    display: inline-block; font-family: "IBM Plex Mono", monospace; font-size: 0.68rem; font-weight: 700;
+    letter-spacing: 0.04em; text-transform: uppercase; padding: 0.15rem 0.5rem; border-radius: 3px; border: 1px solid;
+  }
+  .key-status-pill.registered { color: var(--attested); border-color: var(--attested); }
+  .key-status-pill.local-only { color: var(--insufficient); border-color: var(--insufficient); }
+  .key-status-pill.none { color: var(--slate); border-color: var(--rule-strong); }
+</style>
+
+<body class="attestation-record">
+  <header id="header-root"></header>
+
+  <main class="narrow">
+    <h1 class="page-title">Signing key</h1>
+
+    <section class="panel" id="unsupported-panel" style="display: none">
+      <h2>Browser not supported</h2>
+      <p>
+        This browser doesn't support Ed25519 signing (Web Crypto's
+        <code>SubtleCrypto.generateKey</code> for <code>Ed25519</code>). Client-side key custody needs
+        Chrome/Edge 137+, Firefox 129+, or Safari 17+ — please switch to an up-to-date browser to
+        generate or use a signing key.
+      </p>
+    </section>
+
+    <section class="panel" id="admin-issuer-panel" style="display: none">
+      <h2>Organization</h2>
+      <p class="muted">
+        As a platform admin, you're witnessing this organization's first key registration — the
+        same trust checkpoint as onboarding via <code>/admin/users</code>. Every rotation after
+        this one is self-service by the org's own account.
+      </p>
+      <label for="issuer-select">Organization</label>
+      <select id="issuer-select"></select>
+    </section>
+
+    <section class="panel">
+      <h2>Current key (this browser)</h2>
+      <p id="key-status-line"><span class="key-status-pill none" id="key-status-pill">checking…</span></p>
+      <dl class="key-fields" id="key-fields" style="display: none">
+        <dt>Key id</dt>
+        <dd id="key-id-field">—</dd>
+        <dt>Public key</dt>
+        <dd id="public-key-field">—</dd>
+        <dt>Registered</dt>
+        <dd id="registered-at-field">—</dd>
+      </dl>
+      <p class="muted">
+        The private key was generated in this browser and marked non-extractable — it never leaves
+        this device and this app never has access to it, only to the public key and the signatures
+        it produces. Losing this browser profile means losing the ability to sign with this key;
+        the only recovery is registering a new one.
+      </p>
+    </section>
+
+    <section class="panel">
+      <h2>Generate &amp; register a new signing key</h2>
+      <p class="muted">
+        Generates a fresh Ed25519 keypair in this browser and registers the public key with the
+        platform. This replaces this browser's local key — if one was already registered, the
+        previous key stops being valid for new issuance the moment this one is confirmed (its past
+        credentials remain fully verifiable either way).
+      </p>
+      <label for="reauth-password">Confirm your password</label>
+      <input type="password" id="reauth-password" autocomplete="current-password" />
+      <button id="generate-register-btn">Generate &amp; register new key</button>
+      <p class="error" id="key-error"></p>
+      <p class="success" id="key-success"></p>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+  <script src="/signing.js"></script>
+  <script>
+    let currentUser = null;
+    let targetIssuerId = null;
+
+    function setStatusPill(state, label) {
+      const pill = document.getElementById("key-status-pill");
+      pill.className = `key-status-pill ${state}`;
+      pill.textContent = label;
+    }
+
+    async function refreshKeyStatus() {
+      if (!targetIssuerId) return;
+      const record = await getStoredKeyRecord(targetIssuerId);
+      const fields = document.getElementById("key-fields");
+      if (!record) {
+        setStatusPill("none", "no local key");
+        fields.style.display = "none";
+        return;
+      }
+      const publicKeyB64 = await exportPublicKeyRawB64(record.publicKey);
+      document.getElementById("public-key-field").textContent = publicKeyB64;
+      if (record.keyId) {
+        setStatusPill("registered", "registered");
+        document.getElementById("key-id-field").textContent = record.keyId;
+        document.getElementById("registered-at-field").textContent = record.registeredAt || "—";
+      } else {
+        setStatusPill("local-only", "generated, not yet registered");
+        document.getElementById("key-id-field").textContent = "—";
+        document.getElementById("registered-at-field").textContent = "—";
+      }
+      fields.style.display = "grid";
+    }
+
+    async function populateAdminIssuerSelect() {
+      const panel = document.getElementById("admin-issuer-panel");
+      panel.style.display = "block";
+      const select = document.getElementById("issuer-select");
+      const issuers = await apiFetch("/issuers");
+      select.innerHTML = "";
+      for (const issuer of issuers) {
+        select.appendChild(el("option", { value: issuer.id, text: `${issuer.name} (${issuer.id.slice(0, 10)}…)` }));
+      }
+      targetIssuerId = select.value || null;
+      select.addEventListener("change", () => {
+        targetIssuerId = select.value || null;
+        refreshKeyStatus();
+      });
+      if (targetIssuerId) await refreshKeyStatus();
+    }
+
+    document.getElementById("generate-register-btn").addEventListener("click", async () => {
+      const errorEl = document.getElementById("key-error");
+      const successEl = document.getElementById("key-success");
+      errorEl.textContent = "";
+      successEl.textContent = "";
+
+      if (!targetIssuerId) {
+        errorEl.textContent = currentUser.role === "platform_admin" ? "Select an organization first." : "No organization on this account.";
+        return;
+      }
+      const password = document.getElementById("reauth-password").value;
+      if (!password) {
+        errorEl.textContent = "Enter your password to confirm this action.";
+        return;
+      }
+
+      try {
+        const record = await generateAndStoreNewKeyPair(targetIssuerId);
+        const publicKeyB64 = await exportPublicKeyRawB64(record.publicKey);
+        const resp = await apiFetch(`/issuers/${encodeURIComponent(targetIssuerId)}/keys`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ public_key: publicKeyB64, password }),
+        });
+        await markKeyRegistered(targetIssuerId, resp.key_id, resp.valid_from);
+        document.getElementById("reauth-password").value = "";
+        successEl.textContent = `Registered key ${resp.key_id}. This browser can now sign new credentials for this organization.`;
+        await refreshKeyStatus();
+      } catch (err) {
+        errorEl.textContent = err.message;
+      }
+    });
+
+    (async () => {
+      currentUser = await requireAuth(["org_user", "platform_admin"]);
+      if (!currentUser) return;
+
+      const supported = await isEd25519Supported();
+      if (!supported) {
+        document.getElementById("unsupported-panel").style.display = "block";
+        document.getElementById("generate-register-btn").disabled = true;
+        return;
+      }
+
+      if (currentUser.role === "platform_admin") {
+        await populateAdminIssuerSelect();
+      } else {
+        targetIssuerId = currentUser.org_id;
+        await refreshKeyStatus();
+      }
+    })();
+  </script>
