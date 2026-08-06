@@ -13,6 +13,7 @@ rather than a flat per-document field set.
 """
 import hashlib
 import json
+import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,8 @@ from models import (
     FieldCorrectionRequest,
     HeatOut,
     HeatReviewRequest,
+    IssuerKeyRegisterRequest,
+    IssuerKeyResponse,
     LoginRequest,
     PassportResult,
     SublotOut,
@@ -1127,6 +1130,84 @@ def list_issuers(current_user: dict = Depends(auth.get_current_user), conn=Depen
     auth.require_role(current_user, "platform_admin")
     rows = conn.execute("SELECT id, name, public_key, created_at FROM issuers ORDER BY name").fetchall()
     return [dict(r) for r in rows]
+
+
+@app.post("/issuers/{issuer_id}/keys", response_model=IssuerKeyResponse)
+def register_issuer_key(
+    issuer_id: str,
+    body: IssuerKeyRegisterRequest,
+    current_user: dict = Depends(auth.get_current_user),
+    conn=Depends(get_db),
+):
+    """Client-side key registration: the org's browser generates the
+    keypair (non-extractable private key, Web Crypto) and sends us only
+    the public key. Same trust boundary issue_credential already uses
+    (org_id match, cross-org roles bypassing via require_org_match) --
+    not a client-trusted path parameter.
+
+    First-ever key for an issuer requires platform_admin (witnessed,
+    same flow as org onboarding via POST /admin/users); every
+    subsequent rotation is self-service by the org's own org_user, not
+    platform_admin -- a deliberate, signed-off asymmetry, not an
+    oversight."""
+    auth.require_role(current_user, "org_user", "platform_admin")
+    auth.require_org_match(current_user, issuer_id)
+
+    # Step-up re-auth: confirms the live session is still the actual
+    # account holder before a sensitive, hard-to-undo action (this
+    # credential's future signatures depend on trusting this key).
+    user_row = conn.execute("SELECT password_hash FROM users WHERE id = ?", (current_user["id"],)).fetchone()
+    if user_row is None or not auth.verify_password(body.password, user_row["password_hash"]):
+        raise HTTPException(401, "password confirmation failed")
+
+    issuer = conn.execute("SELECT id FROM issuers WHERE id = ?", (issuer_id,)).fetchone()
+    if issuer is None:
+        raise HTTPException(404, "issuer not found")
+
+    try:
+        crypto_utils.validate_raw_ed25519_public_key(body.public_key)
+    except ValueError:
+        raise HTTPException(400, "public_key must be a base64-encoded raw 32-byte Ed25519 point")
+
+    is_first = conn.execute("SELECT 1 FROM issuer_keys WHERE issuer_id = ?", (issuer_id,)).fetchone() is None
+    if is_first and current_user["role"] != "platform_admin":
+        raise HTTPException(403, "an issuer's first key must be registered by a platform_admin (witnessed onboarding)")
+    if not is_first and current_user["role"] != "org_user":
+        raise HTTPException(403, "key rotation is self-service by the org's own org_user, not platform_admin")
+
+    key_id = uuid.uuid4().hex
+    registered_at = now_iso()
+    # Order matters: the unique partial index (valid_to IS NULL) allows
+    # at most one active key per issuer, so the previous active key
+    # (legacy or real) must be closed out BEFORE the new row is
+    # inserted -- inserting first would momentarily create two
+    # simultaneously-active rows and violate the index.
+    conn.execute(
+        "UPDATE issuer_keys SET valid_to = ? WHERE issuer_id = ? AND valid_to IS NULL",
+        (registered_at, issuer_id),
+    )
+    try:
+        conn.execute(
+            """
+            INSERT INTO issuer_keys (issuer_id, key_id, public_key, valid_from, valid_to, revoked_at, registered_by, created_at)
+            VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)
+            """,
+            (issuer_id, key_id, body.public_key, registered_at, current_user["email"], registered_at),
+        )
+    except sqlite3.IntegrityError:
+        # The same unique index catching a genuine race: two concurrent
+        # rotation requests for this issuer both closed out the old key
+        # and are now both trying to insert a new active one. Whichever
+        # commits first wins; this one just failed the index and must
+        # retry, not overwrite it.
+        conn.rollback()
+        raise HTTPException(409, "a concurrent key rotation for this issuer is already in progress — retry")
+    conn.commit()
+    audit.record(
+        conn, "issuer_key", key_id, "registered", actor=current_user["email"],
+        detail={"issuer_id": issuer_id, "is_first": is_first},
+    )
+    return IssuerKeyResponse(issuer_id=issuer_id, key_id=key_id, public_key=body.public_key, valid_from=registered_at)
 
 
 @app.get("/credentials")

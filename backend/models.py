@@ -148,6 +148,22 @@ class CredentialResponse(BaseModel):
     issued_at: str
 
 
+class IssuerKeyRegisterRequest(BaseModel):
+    public_key: str
+    # Step-up re-auth: re-enter the account password for this specific
+    # sensitive action, same pattern as changing a 2FA device -- proves
+    # the live session is still the actual account holder, not just an
+    # unattended authenticated tab.
+    password: str
+
+
+class IssuerKeyResponse(BaseModel):
+    issuer_id: str
+    key_id: str
+    public_key: str
+    valid_from: str
+
+
 # "revoked" is a distinct outcome from "fail" — a fail means a check ran
 # and found a real problem (banned origin, bad signature); revoked means
 # the credential itself was retracted (its source data changed after

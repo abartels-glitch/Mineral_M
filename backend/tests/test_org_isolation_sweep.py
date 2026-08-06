@@ -139,7 +139,7 @@ def _seed_org_a(client, conn):
     credential_id = issued.json()["id"]
 
     client.post("/auth/logout")
-    return {"document_id": document_id, "heat_id": heat_id, "credential_id": credential_id}
+    return {"document_id": document_id, "heat_id": heat_id, "credential_id": credential_id, "issuer_id": org_a}
 
 
 def _login_org_b(client, conn):
@@ -200,6 +200,17 @@ SWEPT_ROUTES = {
     ("GET", "/passport/{lookup_key}/pdf"): {
         "expect": "public",
         "call": lambda client, ids: client.get(f"/passport/{ids['credential_id']}/pdf"),
+    },
+    # require_org_match rejects org B before the password/key-format
+    # checks are ever reached, so a placeholder password/key here is
+    # fine -- the point is confirming org B can't even get that far
+    # against org A's issuer_id.
+    ("POST", "/issuers/{issuer_id}/keys"): {
+        "expect": "org_blocked",
+        "call": lambda client, ids: client.post(
+            f"/issuers/{ids['issuer_id']}/keys",
+            json={"public_key": "irrelevant-blocked-before-validation", "password": "pw"},
+        ),
     },
 }
 

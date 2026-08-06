@@ -5,11 +5,15 @@ did-jwt-vc) per spec section 4.3 — the credential schema (subject_json /
 sources_json / signature / payload_hash) is written so that swap is
 additive, not a rewrite.
 
-Key custody (pinned decision): the platform generates and holds one
-Ed25519 keypair per issuer/organization, stored as an unencrypted PEM file
-under data/keys/. This is an explicit MVP placeholder, not a real custody
-model — production needs either HSM-backed platform custody or
-supplier-held keys (see README).
+Key custody: as of the client-side key custody + versioned keys
+redesign, new issuer keys are generated in the org's own browser via
+Web Crypto (non-extractable Ed25519 private key, never leaves the
+browser) and registered via POST /issuers/{id}/keys — see main.py and
+db.py's issuer_keys table. generate_issuer_keypair/sign_payload below
+are frozen, not removed: they're what every pre-existing (legacy,
+platform-held) credential was actually signed with, and
+db._migrate_issuer_keys backfills exactly one such key per issuer as
+key_id='legacy-platform-held'. Nothing new calls them going forward.
 """
 import base64
 import json
@@ -112,3 +116,19 @@ def verify_signature(public_key_b64: str, payload: dict, signature_b64: str) -> 
         return True
     except (InvalidSignature, ValueError):
         return False
+
+
+def validate_raw_ed25519_public_key(public_key_b64: str) -> None:
+    """Raises ValueError if public_key_b64 doesn't decode to a valid
+    32-byte Ed25519 public key point. Used at key-registration time to
+    reject a malformed browser-submitted key before it's ever stored —
+    SubtleCrypto's "raw" export format is exactly the bare 32-byte
+    RFC 8032 point per the WebCrypto Secure Curves spec, the same
+    encoding this module already uses for platform-generated keys, so
+    no format conversion is needed, only validation.
+    `base64.b64decode(..., validate=True)` raises binascii.Error (a
+    ValueError subclass) on malformed base64; from_public_bytes raises
+    ValueError on the wrong byte length.
+    """
+    raw_bytes = base64.b64decode(public_key_b64, validate=True)
+    Ed25519PublicKey.from_public_bytes(raw_bytes)
