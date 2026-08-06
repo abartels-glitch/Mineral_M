@@ -27,7 +27,7 @@ import audit
 import auth
 import crypto_utils
 import storage
-from db import get_connection, init_db
+from db import LEGACY_KEY_ID, get_connection, init_db
 
 ISSUER_NAME = "Rio Grande Magnetics"
 ORG_USER_EMAIL = "maria@riograndemagnetics.example"
@@ -176,13 +176,13 @@ def issue_credential(
         INSERT INTO credentials (
             id, issuer_id, credential_type, subject_json, sources_json,
             segregation_attested, segregation_attested_by, segregation_note,
-            document_id, document_content_hash, payload_hash, signature, superseded_by, revoked_at, issued_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+            document_id, document_content_hash, key_id, payload_hash, signature, superseded_by, revoked_at, issued_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
         """,
         (
             credential_id, issuer_id, credential_type, json.dumps(subject), json.dumps(sources),
             1 if segregation_attested else 0, segregation_attested_by, segregation_note,
-            document_id, document_content_hash, payload_hash, signature, issued_at,
+            document_id, document_content_hash, LEGACY_KEY_ID, payload_hash, signature, issued_at,
         ),
     )
     if heat_id is not None:
@@ -214,9 +214,22 @@ def main() -> None:
     else:
         issuer_id = uuid.uuid4().hex
         public_key_b64, private_key_path = crypto_utils.generate_issuer_keypair(issuer_id)
+        created_at = now_iso()
         conn.execute(
             "INSERT INTO issuers (id, name, public_key, private_key_path, created_at) VALUES (?, ?, ?, ?, ?)",
-            (issuer_id, ISSUER_NAME, public_key_b64, private_key_path, now_iso()),
+            (issuer_id, ISSUER_NAME, public_key_b64, private_key_path, created_at),
+        )
+        # Mirrors exactly what db._migrate_issuer_keys does for a
+        # pre-existing issuer -- created inline here rather than relying
+        # on that migration to catch it on the next process start, so a
+        # freshly-seeded issuer's own credentials are verifiable
+        # immediately, not just after a restart.
+        conn.execute(
+            """
+            INSERT INTO issuer_keys (issuer_id, key_id, public_key, valid_from, valid_to, revoked_at, registered_by, created_at)
+            VALUES (?, ?, ?, ?, NULL, NULL, 'seed', ?)
+            """,
+            (issuer_id, LEGACY_KEY_ID, public_key_b64, created_at, created_at),
         )
         conn.commit()
 

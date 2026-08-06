@@ -13,7 +13,7 @@ import pytest
 import crypto_utils
 import passport as passport_engine
 import storage
-from db import SCHEMA
+from db import LEGACY_KEY_ID, SCHEMA
 from seed import issue_credential
 
 US_NDFEB_SUBJECT = {
@@ -42,6 +42,19 @@ def make_issuer(conn, name="Test Issuer"):
     conn.execute(
         "INSERT INTO issuers (id, name, public_key, private_key_path, created_at) VALUES (?, ?, ?, ?, ?)",
         (issuer_id, name, public_key_b64, private_key_path, "2026-01-01T00:00:00Z"),
+    )
+    # seed.issue_credential (used throughout this file) signs with
+    # private_key_path and stamps LEGACY_KEY_ID on the credential --
+    # verification (passport.py's _evaluate_node) now looks that up in
+    # issuer_keys, not issuers.public_key, so this row has to exist for
+    # any of these credentials to verify at all. Mirrors exactly what
+    # db._migrate_issuer_keys does for a real pre-existing issuer.
+    conn.execute(
+        """
+        INSERT INTO issuer_keys (issuer_id, key_id, public_key, valid_from, valid_to, revoked_at, registered_by, created_at)
+        VALUES (?, ?, ?, '2026-01-01T00:00:00Z', NULL, NULL, 'test', '2026-01-01T00:00:00Z')
+        """,
+        (issuer_id, LEGACY_KEY_ID, public_key_b64),
     )
     conn.commit()
     return issuer_id, private_key_path
@@ -315,10 +328,13 @@ def test_swapped_document_bytes_fail_tamper_check(conn):
 def test_evaluate_node_never_fetches_private_key_path(conn):
     """_evaluate_node is reachable from the public, unauthenticated
     /passport/{id} and /passport/{id}/pdf endpoints and only needs
-    issuers.public_key for signature verification. Regression guard: if
-    its query is ever widened back to SELECT *, this catches it before
-    private_key_path starts getting pulled into memory on every public
-    passport lookup."""
+    issuer_keys.public_key for signature verification (moved off
+    issuers.public_key in Stage 4 of the key-custody redesign, but the
+    same discipline applies -- issuer_keys doesn't even have a
+    private_key_path column, so this is now structurally, not just
+    behaviorally, guarded). Regression guard: if the query is ever
+    widened back to SELECT *, this catches anything sensitive riding
+    along on every public passport lookup."""
     issuer_id, key_path = make_issuer(conn)
     cred_id = issue_credential(conn, issuer_id, key_path, "sintered_ndfeb_batch", US_NDFEB_SUBJECT, None, [])
     conn.commit()

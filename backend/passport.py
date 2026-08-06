@@ -102,11 +102,18 @@ def _evaluate_node(conn: sqlite3.Connection, credential_id: str) -> tuple[dict, 
             [],
         )
 
-    # Narrow SELECT: only public_key is used below (for signature
-    # verification). This function is reachable from the public,
-    # unauthenticated /passport/{id} and /passport/{id}/pdf endpoints, so
-    # it must never pull private_key_path into memory here.
-    issuer = conn.execute("SELECT public_key FROM issuers WHERE id = ?", (row["issuer_id"],)).fetchone()
+    # Narrow SELECT: only the columns needed to check "was this specific
+    # key valid for this issuer when this credential was signed" and to
+    # verify against its public key. This function is reachable from
+    # the public, unauthenticated /passport/{id} and /passport/{id}/pdf
+    # endpoints, so it must never pull anything sensitive into memory
+    # here (there's nothing sensitive in issuer_keys either way — only
+    # public_key, same discipline as the old issuers.public_key lookup
+    # this replaces).
+    key = conn.execute(
+        "SELECT public_key, valid_from, valid_to, revoked_at FROM issuer_keys WHERE issuer_id = ? AND key_id = ?",
+        (row["issuer_id"], row["key_id"]),
+    ).fetchone()
     subject = json.loads(row["subject_json"])
     sources = json.loads(row["sources_json"])
     material_type = subject.get("material_type")
@@ -125,8 +132,8 @@ def _evaluate_node(conn: sqlite3.Connection, credential_id: str) -> tuple[dict, 
         if rank[new_status] > rank[node_status]:
             node_status = new_status
 
-    if issuer is None:
-        reasons.append("issuer record missing — cannot verify signature")
+    if key is None:
+        reasons.append("signing key record missing — cannot verify signature")
         downgrade("fail")
     else:
         payload = credential_signable_payload(
@@ -142,9 +149,32 @@ def _evaluate_node(conn: sqlite3.Connection, credential_id: str) -> tuple[dict, 
             document_content_hash=row["document_content_hash"],
             issued_at=row["issued_at"],
         )
-        if not verify_signature(issuer["public_key"], payload, row["signature"]):
+        # The structural fix: was THIS key_id valid for this issuer at
+        # the time THIS credential was signed -- not "is this the
+        # issuer's current public_key" (today's bug: a routine rotation
+        # would retroactively break every credential signed under the
+        # previous key, since verification always checked whatever
+        # public_key currently happened to be on file). valid_to IS
+        # NULL means still active; the upper bound is exclusive so a
+        # credential signed in the same instant a new key takes over
+        # unambiguously belongs to one key or the other, never both.
+        was_valid = key["valid_from"] <= row["issued_at"] and (key["valid_to"] is None or row["issued_at"] < key["valid_to"])
+        if not was_valid:
+            reasons.append(f"signing key {row['key_id']} was not valid for this issuer at {row['issued_at']}")
+            downgrade("fail")
+        elif not verify_signature(key["public_key"], payload, row["signature"]):
             reasons.append("signature does not verify")
             downgrade("fail")
+        # Retroactive per the pinned decision: a key reported compromised
+        # can't be trusted to distinguish "signed before the leak" from
+        # "signed after" -- revoked_at is a detection-time proxy, not the
+        # true compromise time, so every credential this key ever signed
+        # is flagged, not just ones issued after revoked_at. "revoked"
+        # outranks "fail" via downgrade() above, so this headlines even
+        # when the signature/window checks above also failed.
+        if key["revoked_at"]:
+            reasons.append(f"signing key was revoked at {key['revoked_at']} — issuer reported this key as compromised")
+            downgrade("revoked")
 
     if row["document_id"] and row["document_content_hash"]:
         document = conn.execute("SELECT * FROM documents WHERE id = ?", (row["document_id"],)).fetchone()
