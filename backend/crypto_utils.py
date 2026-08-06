@@ -5,15 +5,35 @@ did-jwt-vc) per spec section 4.3 — the credential schema (subject_json /
 sources_json / signature / payload_hash) is written so that swap is
 additive, not a rewrite.
 
-Key custody: as of the client-side key custody + versioned keys
-redesign, new issuer keys are generated in the org's own browser via
-Web Crypto (non-extractable Ed25519 private key, never leaves the
-browser) and registered via POST /issuers/{id}/keys — see main.py and
-db.py's issuer_keys table. generate_issuer_keypair/sign_payload below
-are frozen, not removed: they're what every pre-existing (legacy,
-platform-held) credential was actually signed with, and
-db._migrate_issuer_keys backfills exactly one such key per issuer as
-key_id='legacy-platform-held'. Nothing new calls them going forward.
+Key custody: each org generates and holds its own Ed25519 keypair
+client-side (Web Crypto in the org's own browser, non-extractable
+private key that never leaves the browser — see frontend/signing.js)
+and registers only the public key via POST /issuers/{id}/keys. The
+platform never sees, transmits, or stores a private key. Keys are
+versioned in db.py's issuer_keys table (one row per key, with a
+valid_from/valid_to window) so rotating a key doesn't retroactively
+invalidate credentials signed under a prior one — passport.py's
+_evaluate_node checks whichever key was actually active when a given
+credential was issued, not whatever key is active now. Revocation
+(issuer_keys.revoked_at) is deliberately retroactive: there's no way to
+know whether a reported-compromised key leaked before or after any
+given signature, so every credential that key ever signed is flagged,
+not just ones issued after the revocation timestamp.
+
+Known limitation, not yet solved: key registration proves the request
+came from an authenticated session for that org (role/org_id checks
+plus a password step-up re-auth — see main.py's register_issuer_key),
+not that the browser or its holder is who they claim to be in the real
+world. There's no notarization, KYC, or hardware attestation behind a
+registered key — a compromised org account can still register an
+attacker-controlled key. Closing that gap needs real identity
+verification, not just session auth.
+
+generate_issuer_keypair/sign_payload below are frozen, not removed:
+they're what every pre-existing (legacy, platform-held) credential was
+actually signed with, and db._migrate_issuer_keys backfills exactly one
+such key per issuer as key_id='legacy-platform-held'. Nothing new calls
+them going forward.
 """
 import base64
 import json
