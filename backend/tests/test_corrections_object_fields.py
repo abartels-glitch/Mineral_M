@@ -22,6 +22,7 @@ import crypto_utils
 import llm_extractor
 import main
 import storage
+from _issuance_helpers import issue_via_api, make_issuer_key
 from db import SCHEMA
 
 
@@ -216,7 +217,8 @@ def test_correct_test_results_revokes_issued_credential(client, conn, monkeypatc
     """Same auto-revoke guarantee every other heat-field correction
     already has (_revoke_stale_credential fires unconditionally on
     field_name, not a hardcoded scalar-fields list)."""
-    _login_org_user(client, conn)
+    org_id = _login_org_user(client, conn)
+    key_id, private_key = make_issuer_key(conn, org_id)
     upload = _upload_mocked(client, monkeypatch, [_missing_test_results_heat()]).json()
     doc_id = upload["id"]
     heat_id = upload["heats"][0]["id"]
@@ -229,14 +231,12 @@ def test_correct_test_results_revokes_issued_credential(client, conn, monkeypatc
             "sublots": [{"origin_country": "United States", "origin_confidence": "high", "blend_pct": 100.0}],
         },
     )
-    issued = client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "collected_scrap_lot",
-            "heat_id": heat_id,
-            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States", "mass_kg": 60.0},
-            "sources": [],
-        },
+    issued = issue_via_api(
+        client, private_key, key_id,
+        credential_type="collected_scrap_lot",
+        heat_id=heat_id,
+        subject={"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States", "mass_kg": 60.0},
+        sources=[],
     )
     assert issued.status_code == 200, issued.text
     cred_id = issued.json()["id"]

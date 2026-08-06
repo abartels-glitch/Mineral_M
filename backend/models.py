@@ -129,6 +129,35 @@ class CredentialIssueRequest(BaseModel):
     segregation_note: Optional[str] = None
 
 
+class CredentialPrepareResponse(BaseModel):
+    credential_id: str
+    issued_at: str
+    document_id: Optional[str]
+    document_content_hash: Optional[str]
+    # base64 of the exact bytes to sign (crypto_utils.canonical_bytes of
+    # the unchanged credential_signable_payload) -- the client signs
+    # these opaque bytes directly rather than reconstructing canonical
+    # JSON itself, deliberately, to avoid cross-language float
+    # serialization mismatches (e.g. Python's json.dumps(200.0) ->
+    # "200.0" vs JS's JSON.stringify(200.0) -> "200") that would
+    # otherwise make signatures fail to verify intermittently.
+    signable_bytes_b64: str
+
+
+class CredentialIssueSubmitRequest(CredentialIssueRequest):
+    """Everything /credentials/issue/prepare returned, echoed back,
+    plus the client's signature. The server re-derives the payload
+    independently (re-validating and re-fetching document_content_hash
+    fresh, never trusting this echo of it) and only persists if the
+    signature verifies against its own reconstruction -- see
+    main.py::issue_credential."""
+
+    credential_id: str
+    issued_at: str
+    key_id: str
+    signature_b64: str
+
+
 class CredentialResponse(BaseModel):
     id: str
     issuer_id: str
@@ -141,6 +170,7 @@ class CredentialResponse(BaseModel):
     document_id: Optional[str]
     document_content_hash: Optional[str]
     heat_id: Optional[str]
+    key_id: str
     payload_hash: str
     signature: str
     superseded_by: Optional[str]

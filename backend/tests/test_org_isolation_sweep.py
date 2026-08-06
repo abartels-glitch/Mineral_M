@@ -39,6 +39,7 @@ import auth
 import crypto_utils
 import main
 import storage
+from _issuance_helpers import issue_via_api, make_issuer_key
 from db import SCHEMA
 
 MTR_TEXT = (
@@ -104,6 +105,7 @@ def _seed_org_a(client, conn):
     org_a = make_issuer(conn, "Org A")
     make_user(conn, "a@example.com", "pw", "org_user", org_a)
     client.post("/auth/login", json={"email": "a@example.com", "password": "pw"})
+    key_id, private_key = make_issuer_key(conn, org_a)
 
     upload = client.post(
         "/documents/upload",
@@ -121,19 +123,17 @@ def _seed_org_a(client, conn):
             "sublots": [{"origin_country": "United States", "origin_confidence": "high", "blend_pct": 100.0}],
         },
     )
-    issued = client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "collected_scrap_lot",
-            "heat_id": heat_id,
-            "subject": {
-                "material_type": "Sintered NdFeB Magnet Alloy (N42)",
-                "origin_country": "United States",
-                "mass_kg": 50.0,
-                "heat_number": "TR-0001",
-            },
-            "sources": [],
+    issued = issue_via_api(
+        client, private_key, key_id,
+        credential_type="collected_scrap_lot",
+        heat_id=heat_id,
+        subject={
+            "material_type": "Sintered NdFeB Magnet Alloy (N42)",
+            "origin_country": "United States",
+            "mass_kg": 50.0,
+            "heat_number": "TR-0001",
         },
+        sources=[],
     )
     assert issued.status_code == 200, issued.text
     credential_id = issued.json()["id"]
@@ -300,12 +300,18 @@ def test_credential_issue_rejects_cross_org_source(client, conn):
     """sources[] previously only checked that each id existed, never
     who owned it — letting one org issue a signed credential citing
     another org's real credential as a parent with no consent. This is
-    exactly what was proven live against the dev server."""
+    exactly what was proven live against the dev server.
+
+    Calls /credentials/issue/prepare, not /credentials/issue — since
+    the two-phase cutover, this ownership check runs in prepare (no
+    signature exists yet to check anything against); submit re-runs
+    the identical check via the same shared _validate_issuance_request,
+    so this still covers the real enforcement point, not a bypassed one."""
     ids = _seed_org_a(client, conn)
     _login_org_b(client, conn)
 
     resp = client.post(
-        "/credentials/issue",
+        "/credentials/issue/prepare",
         json={
             "credential_type": "sintered_ndfeb_batch",
             "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
@@ -318,12 +324,14 @@ def test_credential_issue_rejects_cross_org_source(client, conn):
 def test_credential_issue_rejects_cross_org_heat_id(client, conn):
     """The heat_id check already worked (hand-rolled) before this fix;
     this locks in that it still works now that it's routed through the
-    shared require_owned_heat_by_id instead of a one-off inline check."""
+    shared require_owned_heat_by_id instead of a one-off inline check.
+    Calls prepare, see test_credential_issue_rejects_cross_org_source
+    above for why."""
     ids = _seed_org_a(client, conn)
     _login_org_b(client, conn)
 
     resp = client.post(
-        "/credentials/issue",
+        "/credentials/issue/prepare",
         json={
             "credential_type": "collected_scrap_lot",
             "heat_id": ids["heat_id"],

@@ -11,6 +11,7 @@ own credential; passport.py's compliance checks are unchanged, they just
 now read a subject the reviewer confirmed from a specific heat's data
 rather than a flat per-document field set.
 """
+import base64
 import hashlib
 import json
 import sqlite3
@@ -38,6 +39,8 @@ from db import get_db, init_db
 from models import (
     CreateUserRequest,
     CredentialIssueRequest,
+    CredentialIssueSubmitRequest,
+    CredentialPrepareResponse,
     CredentialResponse,
     DocumentDetail,
     DocumentUploadResponse,
@@ -1231,12 +1234,21 @@ def list_credentials(current_user: dict = Depends(auth.get_current_user), conn=D
     ]
 
 
-@app.post("/credentials/issue", response_model=CredentialResponse)
-def issue_credential(
-    body: CredentialIssueRequest,
-    current_user: dict = Depends(auth.get_current_user),
-    conn=Depends(get_db),
-):
+def _validate_issuance_request(conn, current_user: dict, body: CredentialIssueRequest):
+    """Every check both /credentials/issue/prepare and /credentials/issue
+    (submit) need, run fresh on every call rather than trusted stale
+    from an earlier one — state can change between prepare and submit
+    (a concurrent issuance claiming the same heat, a correction landing
+    on it, a source getting revoked). Shared so the two phases can't
+    silently drift apart on what's allowed, same principle as
+    crypto_utils.credential_signable_payload being shared between
+    issuance and verification.
+
+    Returns (issuer_row, document_id, document_content_hash,
+    supersedes_credential_id) — prepare has no use for the last one
+    (nothing to persist yet); submit uses it directly rather than
+    re-fetching the same heat row a second time.
+    """
     auth.require_role(current_user, "org_user")
     issuer_id = current_user["org_id"]
     issuer = conn.execute("SELECT * FROM issuers WHERE id = ?", (issuer_id,)).fetchone()
@@ -1278,7 +1290,7 @@ def issue_credential(
             # Fast-path check only, not the actual guard: two concurrent
             # issuances from the same heat would both read credential_id
             # as unset/revoked here before either commits. The real
-            # guard is the conditional UPDATE further down (checked via
+            # guard is submit's conditional UPDATE (checked via
             # rowcount, not this read) — see its comment.
             existing = conn.execute(
                 "SELECT id, revoked_at FROM credentials WHERE id = ?", (heat["credential_id"],)
@@ -1301,11 +1313,33 @@ def issue_credential(
         # sourcing stays same-org-only.
         require_owned_credential(conn, current_user, source_id)
 
+    return issuer, document_id, document_content_hash, supersedes_credential_id
+
+
+@app.post("/credentials/issue/prepare", response_model=CredentialPrepareResponse)
+def prepare_credential_issue(
+    body: CredentialIssueRequest,
+    current_user: dict = Depends(auth.get_current_user),
+    conn=Depends(get_db),
+):
+    """Phase 1 of client-side-signed issuance. Runs every check the old
+    (pre-cutover) one-step endpoint used to run, but persists nothing
+    and signs nothing — the org's browser holds the private key now,
+    not this server. Returns the exact bytes to sign
+    (crypto_utils.canonical_bytes of the unchanged
+    credential_signable_payload) plus the credential_id/issued_at the
+    client must echo back verbatim at submit time, since both are
+    baked into what it's about to sign — altering either after the
+    fact makes the signature fail to verify against submit's own
+    reconstruction, not a hole that needs a separate check.
+    """
+    issuer, document_id, document_content_hash, _supersedes = _validate_issuance_request(conn, current_user, body)
+
     credential_id = uuid.uuid4().hex
     issued_at = now_iso()
     payload = crypto_utils.credential_signable_payload(
         id=credential_id,
-        issuer_id=issuer_id,
+        issuer_id=issuer["id"],
         credential_type=body.credential_type,
         subject=body.subject,
         sources=body.sources,
@@ -1316,18 +1350,73 @@ def issue_credential(
         document_content_hash=document_content_hash,
         issued_at=issued_at,
     )
-    signature, payload_hash = crypto_utils.sign_payload(issuer["private_key_path"], payload)
+    return CredentialPrepareResponse(
+        credential_id=credential_id,
+        issued_at=issued_at,
+        document_id=document_id,
+        document_content_hash=document_content_hash,
+        signable_bytes_b64=base64.b64encode(crypto_utils.canonical_bytes(payload)).decode("ascii"),
+    )
+
+
+@app.post("/credentials/issue", response_model=CredentialResponse)
+def issue_credential(
+    body: CredentialIssueSubmitRequest,
+    current_user: dict = Depends(auth.get_current_user),
+    conn=Depends(get_db),
+):
+    """Phase 2: re-runs every check prepare already ran — state may
+    have changed since then — and, critically, re-fetches
+    document_content_hash fresh from the DB rather than trusting this
+    request's echo of it, then verifies the client's signature against
+    its own reconstruction of the payload before persisting anything.
+    """
+    issuer, document_id, document_content_hash, supersedes_credential_id = _validate_issuance_request(
+        conn, current_user, body
+    )
+    issuer_id = issuer["id"]
+
+    # The key must be this issuer's CURRENT active key — signing new
+    # credentials with an old, superseded, or revoked key_id isn't a
+    # legitimate case (that's what verifying a credential against the
+    # key that was active *at issuance time* is for; issuance itself
+    # should always use whatever key the org currently controls).
+    key = conn.execute(
+        "SELECT public_key, valid_to, revoked_at FROM issuer_keys WHERE issuer_id = ? AND key_id = ?",
+        (issuer_id, body.key_id),
+    ).fetchone()
+    if key is None:
+        raise HTTPException(400, "unknown key_id for this issuer")
+    if key["valid_to"] is not None or key["revoked_at"] is not None:
+        raise HTTPException(400, "key_id is not the issuer's current active key")
+
+    payload = crypto_utils.credential_signable_payload(
+        id=body.credential_id,
+        issuer_id=issuer_id,
+        credential_type=body.credential_type,
+        subject=body.subject,
+        sources=body.sources,
+        segregation_attested=body.segregation_attested,
+        segregation_attested_by=body.segregation_attested_by,
+        segregation_note=body.segregation_note,
+        document_id=document_id,
+        document_content_hash=document_content_hash,
+        issued_at=body.issued_at,
+    )
+    if not crypto_utils.verify_signature(key["public_key"], payload, body.signature_b64):
+        raise HTTPException(400, "signature does not verify against the reconstructed payload")
+    payload_hash = hashlib.sha256(crypto_utils.canonical_bytes(payload)).hexdigest()
 
     conn.execute(
         """
         INSERT INTO credentials (
             id, issuer_id, credential_type, subject_json, sources_json,
             segregation_attested, segregation_attested_by, segregation_note,
-            document_id, document_content_hash, heat_id, payload_hash, signature, superseded_by, revoked_at, issued_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+            document_id, document_content_hash, heat_id, key_id, payload_hash, signature, superseded_by, revoked_at, issued_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
         """,
         (
-            credential_id,
+            body.credential_id,
             issuer_id,
             body.credential_type,
             json.dumps(body.subject),
@@ -1338,9 +1427,10 @@ def issue_credential(
             document_id,
             document_content_hash,
             body.heat_id,
+            body.key_id,
             payload_hash,
-            signature,
-            issued_at,
+            body.signature_b64,
+            body.issued_at,
         ),
     )
     if body.heat_id is not None:
@@ -1353,7 +1443,11 @@ def issue_credential(
         # nothing SQLite-specific) — whichever commits first wins the
         # claim, and the second's WHERE clause then simply fails to
         # match the now-claimed row. rowcount, not the earlier SELECT,
-        # is the source of truth for whether this request won.
+        # is the source of truth for whether this request won. This is
+        # identical to the pre-cutover one-step endpoint's own guard —
+        # splitting issuance into two phases doesn't move or weaken it,
+        # since nothing is persisted (and so nothing can race) before
+        # this point.
         claim = conn.execute(
             """
             UPDATE document_heats
@@ -1364,7 +1458,7 @@ def issue_credential(
                 OR credential_id IN (SELECT id FROM credentials WHERE revoked_at IS NOT NULL)
               )
             """,
-            (credential_id, body.heat_id),
+            (body.credential_id, body.heat_id),
         )
         if claim.rowcount == 0:
             conn.rollback()
@@ -1376,27 +1470,27 @@ def issue_credential(
     # resolves via its bare-credential_id fallback stage, so nothing here
     # breaks for an issuer that hasn't registered a UII prefix yet.
     if issuer["iac"] and issuer["enterprise_id"]:
-        uii_code = uii.generate_uii(issuer["iac"], issuer["enterprise_id"], credential_id)
+        uii_code = uii.generate_uii(issuer["iac"], issuer["enterprise_id"], body.credential_id)
     else:
-        uii_code = credential_id
+        uii_code = body.credential_id
     conn.execute(
         "INSERT INTO uii_bindings (id, credential_id, uii_code, created_at) VALUES (?, ?, ?, ?)",
-        (uuid.uuid4().hex, credential_id, uii_code, issued_at),
+        (uuid.uuid4().hex, body.credential_id, uii_code, body.issued_at),
     )
     if supersedes_credential_id is not None:
-        conn.execute("UPDATE credentials SET superseded_by = ? WHERE id = ?", (credential_id, supersedes_credential_id))
+        conn.execute("UPDATE credentials SET superseded_by = ? WHERE id = ?", (body.credential_id, supersedes_credential_id))
         audit.record(
             conn, "credential", supersedes_credential_id, "superseded",
-            actor=current_user["email"], detail={"superseded_by": credential_id},
+            actor=current_user["email"], detail={"superseded_by": body.credential_id},
         )
     conn.commit()
     audit.record(
-        conn, "credential", credential_id, "issued", actor=current_user["email"],
-        detail={"credential_type": body.credential_type, "supersedes": supersedes_credential_id},
+        conn, "credential", body.credential_id, "issued", actor=current_user["email"],
+        detail={"credential_type": body.credential_type, "supersedes": supersedes_credential_id, "key_id": body.key_id},
     )
 
     return CredentialResponse(
-        id=credential_id,
+        id=body.credential_id,
         issuer_id=issuer_id,
         credential_type=body.credential_type,
         subject=body.subject,
@@ -1407,11 +1501,12 @@ def issue_credential(
         document_id=document_id,
         document_content_hash=document_content_hash,
         heat_id=body.heat_id,
+        key_id=body.key_id,
         payload_hash=payload_hash,
-        signature=signature,
+        signature=body.signature_b64,
         superseded_by=None,
         revoked_at=None,
-        issued_at=issued_at,
+        issued_at=body.issued_at,
     )
 
 

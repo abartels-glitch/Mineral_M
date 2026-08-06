@@ -18,6 +18,7 @@ import llm_extractor
 import main
 import review_flags
 import storage
+from _issuance_helpers import issue_via_api, make_issuer_key
 from db import SCHEMA
 
 MTR_TEXT = (
@@ -487,19 +488,18 @@ def test_review_does_not_reopen_a_flag_already_resolved_via_correct(client, conn
 
 
 def test_credential_issue_requires_reviewed_heat(client, conn):
-    _login_org_user(client, conn)
+    org_id = _login_org_user(client, conn)
+    key_id, private_key = make_issuer_key(conn, org_id)
     upload = _upload(client).json()
     doc_id = upload["id"]
     heat_id = upload["heats"][0]["id"]
 
-    unreviewed = client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "collected_scrap_lot",
-            "heat_id": heat_id,
-            "subject": {"material_type": "NdFeB", "origin_country": "United States"},
-            "sources": [],
-        },
+    unreviewed = issue_via_api(
+        client, private_key, key_id,
+        credential_type="collected_scrap_lot",
+        heat_id=heat_id,
+        subject={"material_type": "NdFeB", "origin_country": "United States"},
+        sources=[],
     )
     assert unreviewed.status_code == 400
 
@@ -512,14 +512,12 @@ def test_credential_issue_requires_reviewed_heat(client, conn):
         },
     )
 
-    issued = client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "collected_scrap_lot",
-            "heat_id": heat_id,
-            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
-            "sources": [],
-        },
+    issued = issue_via_api(
+        client, private_key, key_id,
+        credential_type="collected_scrap_lot",
+        heat_id=heat_id,
+        subject={"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
+        sources=[],
     )
     assert issued.status_code == 200
     cred_id = issued.json()["id"]
@@ -527,14 +525,12 @@ def test_credential_issue_requires_reviewed_heat(client, conn):
     heat_row = conn.execute("SELECT credential_id FROM document_heats WHERE id = ?", (heat_id,)).fetchone()
     assert heat_row["credential_id"] == cred_id
 
-    double_issue = client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "collected_scrap_lot",
-            "heat_id": heat_id,
-            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
-            "sources": [],
-        },
+    double_issue = issue_via_api(
+        client, private_key, key_id,
+        credential_type="collected_scrap_lot",
+        heat_id=heat_id,
+        subject={"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
+        sources=[],
     )
     assert double_issue.status_code == 409
 
@@ -548,7 +544,8 @@ def test_credential_issue_requires_no_open_blocking_flag(client, conn):
     test_corrections.py's test_fully_addressed_false_when_review_
     submitted_with_open_blocking_flag, which reproduces the same China
     sub-lot shape used here)."""
-    _login_org_user(client, conn)
+    org_id = _login_org_user(client, conn)
+    key_id, private_key = make_issuer_key(conn, org_id)
     upload = _upload(client).json()
     doc_id = upload["id"]
     heat_id = upload["heats"][0]["id"]
@@ -567,14 +564,12 @@ def test_credential_issue_requires_no_open_blocking_flag(client, conn):
     assert blocking_flag["severity"] == "blocking"
     assert blocking_flag["status"] == "open"
 
-    blocked = client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "collected_scrap_lot",
-            "heat_id": heat_id,
-            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "China"},
-            "sources": [],
-        },
+    blocked = issue_via_api(
+        client, private_key, key_id,
+        credential_type="collected_scrap_lot",
+        heat_id=heat_id,
+        subject={"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "China"},
+        sources=[],
     )
     assert blocked.status_code == 409, blocked.text
 
@@ -589,14 +584,12 @@ def test_credential_issue_requires_no_open_blocking_flag(client, conn):
             "corrected_value": "United States",
         },
     )
-    allowed = client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "collected_scrap_lot",
-            "heat_id": heat_id,
-            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
-            "sources": [],
-        },
+    allowed = issue_via_api(
+        client, private_key, key_id,
+        credential_type="collected_scrap_lot",
+        heat_id=heat_id,
+        subject={"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
+        sources=[],
     )
     assert allowed.status_code == 200, allowed.text
 
@@ -656,7 +649,8 @@ def test_correcting_the_only_sublot_also_resolves_the_llms_own_heat_level_origin
         }
 
     monkeypatch.setattr(llm_extractor, "extract_structured", fake_extract_structured)
-    _login_org_user(client, conn)
+    org_id = _login_org_user(client, conn)
+    key_id, private_key = make_issuer_key(conn, org_id)
     upload = client.post(
         "/documents/upload",
         files={"file": ("covered.txt", b"irrelevant, extraction is mocked", "text/plain")},
@@ -703,14 +697,12 @@ def test_correcting_the_only_sublot_also_resolves_the_llms_own_heat_level_origin
     )
     assert corrected["fully_addressed"] is True
 
-    issued = client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "collected_scrap_lot",
-            "heat_id": heat_id,
-            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
-            "sources": [],
-        },
+    issued = issue_via_api(
+        client, private_key, key_id,
+        credential_type="collected_scrap_lot",
+        heat_id=heat_id,
+        subject={"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
+        sources=[],
     )
     assert issued.status_code == 200, issued.text
 

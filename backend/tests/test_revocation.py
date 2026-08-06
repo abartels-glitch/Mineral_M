@@ -21,6 +21,7 @@ import auth
 import crypto_utils
 import main
 import storage
+from _issuance_helpers import issue_via_api, make_issuer_key_synced_with_legacy_column
 from db import SCHEMA
 
 MTR_TEXT = (
@@ -84,7 +85,7 @@ def _login_org_user(client, conn):
     return org_id
 
 
-def _upload_review_issue(client, filename="mtr.txt", mass_kg=50.0, origin_country="United States"):
+def _upload_review_issue(client, private_key, key_id, filename="mtr.txt", mass_kg=50.0, origin_country="United States"):
     """Upload -> review (clean, high-confidence sublot) -> issue.
     Returns (document_id, heat_id, credential_id)."""
     upload = client.post(
@@ -102,19 +103,17 @@ def _upload_review_issue(client, filename="mtr.txt", mass_kg=50.0, origin_countr
             "sublots": [{"origin_country": origin_country, "origin_confidence": "high", "blend_pct": 100.0}],
         },
     )
-    issued = client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "collected_scrap_lot",
-            "heat_id": heat_id,
-            "subject": {
-                "material_type": "Sintered NdFeB Magnet Alloy (N42)",
-                "origin_country": origin_country,
-                "mass_kg": mass_kg,
-                "heat_number": "TR-0001",
-            },
-            "sources": [],
+    issued = issue_via_api(
+        client, private_key, key_id,
+        credential_type="collected_scrap_lot",
+        heat_id=heat_id,
+        subject={
+            "material_type": "Sintered NdFeB Magnet Alloy (N42)",
+            "origin_country": origin_country,
+            "mass_kg": mass_kg,
+            "heat_number": "TR-0001",
         },
+        sources=[],
     )
     assert issued.status_code == 200, issued.text
     return doc_id, heat_id, issued.json()["id"]
@@ -124,8 +123,9 @@ def _upload_review_issue(client, filename="mtr.txt", mass_kg=50.0, origin_countr
 
 
 def test_correcting_heat_field_on_credentialed_heat_revokes_credential(client, conn):
-    _login_org_user(client, conn)
-    doc_id, heat_id, cred_id = _upload_review_issue(client)
+    org_id = _login_org_user(client, conn)
+    key_id, private_key = make_issuer_key_synced_with_legacy_column(conn, org_id)
+    doc_id, heat_id, cred_id = _upload_review_issue(client, private_key, key_id)
 
     resp = client.post(
         f"/documents/{doc_id}/heats/{heat_id}/correct",
@@ -145,8 +145,9 @@ def test_correcting_sublot_field_on_credentialed_heat_revokes_credential(client,
     subject — the deliberate design choice (subject is free-typed at
     issuance, not schema-validated against heat/sub-lot fields, so
     there's no reliable way to know which corrections 'mattered')."""
-    _login_org_user(client, conn)
-    doc_id, heat_id, cred_id = _upload_review_issue(client)
+    org_id = _login_org_user(client, conn)
+    key_id, private_key = make_issuer_key_synced_with_legacy_column(conn, org_id)
+    doc_id, heat_id, cred_id = _upload_review_issue(client, private_key, key_id)
     heat = client.get(f"/documents/{doc_id}").json()["heats"][0]
     sublot_id = heat["sublots"][0]["id"]
 
@@ -163,8 +164,9 @@ def test_correcting_sublot_field_on_credentialed_heat_revokes_credential(client,
 
 
 def test_correction_revocation_is_idempotent(client, conn):
-    _login_org_user(client, conn)
-    doc_id, heat_id, cred_id = _upload_review_issue(client)
+    org_id = _login_org_user(client, conn)
+    key_id, private_key = make_issuer_key_synced_with_legacy_column(conn, org_id)
+    doc_id, heat_id, cred_id = _upload_review_issue(client, private_key, key_id)
 
     client.post(
         f"/documents/{doc_id}/heats/{heat_id}/correct",
@@ -207,8 +209,9 @@ def test_correction_on_uncredentialed_heat_does_not_touch_credentials(client, co
 
 
 def test_revoked_credential_passport_shows_revoked_not_stale_pass(client, conn):
-    _login_org_user(client, conn)
-    doc_id, heat_id, cred_id = _upload_review_issue(client)
+    org_id = _login_org_user(client, conn)
+    key_id, private_key = make_issuer_key_synced_with_legacy_column(conn, org_id)
+    doc_id, heat_id, cred_id = _upload_review_issue(client, private_key, key_id)
 
     before = client.get(f"/passport/{cred_id}").json()
     assert before["verdict"] == "pass"
@@ -228,42 +231,40 @@ def test_revoked_credential_passport_shows_revoked_not_stale_pass(client, conn):
 
 
 def test_reissue_blocked_while_credential_still_active(client, conn):
-    _login_org_user(client, conn)
-    doc_id, heat_id, cred_id = _upload_review_issue(client)
+    org_id = _login_org_user(client, conn)
+    key_id, private_key = make_issuer_key_synced_with_legacy_column(conn, org_id)
+    doc_id, heat_id, cred_id = _upload_review_issue(client, private_key, key_id)
 
-    resp = client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "collected_scrap_lot",
-            "heat_id": heat_id,
-            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
-            "sources": [],
-        },
+    resp = issue_via_api(
+        client, private_key, key_id,
+        credential_type="collected_scrap_lot",
+        heat_id=heat_id,
+        subject={"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
+        sources=[],
     )
     assert resp.status_code == 409
 
 
 def test_reissue_allowed_after_revocation_and_wires_supersession(client, conn):
-    _login_org_user(client, conn)
-    doc_id, heat_id, cred_id = _upload_review_issue(client)
+    org_id = _login_org_user(client, conn)
+    key_id, private_key = make_issuer_key_synced_with_legacy_column(conn, org_id)
+    doc_id, heat_id, cred_id = _upload_review_issue(client, private_key, key_id)
     client.post(
         f"/documents/{doc_id}/heats/{heat_id}/correct",
         json={"target": "heat", "field_name": "mass_kg", "corrected_value": "55.0"},
     )
 
-    reissued = client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "collected_scrap_lot",
-            "heat_id": heat_id,
-            "subject": {
-                "material_type": "Sintered NdFeB Magnet Alloy (N42)",
-                "origin_country": "United States",
-                "mass_kg": 55.0,
-                "heat_number": "TR-0001",
-            },
-            "sources": [],
+    reissued = issue_via_api(
+        client, private_key, key_id,
+        credential_type="collected_scrap_lot",
+        heat_id=heat_id,
+        subject={
+            "material_type": "Sintered NdFeB Magnet Alloy (N42)",
+            "origin_country": "United States",
+            "mass_kg": 55.0,
+            "heat_number": "TR-0001",
         },
+        sources=[],
     )
     assert reissued.status_code == 200
     new_cred_id = reissued.json()["id"]
@@ -278,14 +279,12 @@ def test_reissue_allowed_after_revocation_and_wires_supersession(client, conn):
 
     # the new credential is active — issuing a third time is blocked
     # exactly like the very first re-issue attempt would have been
-    third = client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "collected_scrap_lot",
-            "heat_id": heat_id,
-            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
-            "sources": [],
-        },
+    third = issue_via_api(
+        client, private_key, key_id,
+        credential_type="collected_scrap_lot",
+        heat_id=heat_id,
+        subject={"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
+        sources=[],
     )
     assert third.status_code == 409
 
@@ -295,20 +294,19 @@ def test_old_credential_audit_trail_survives_supersession(client, conn):
     heat's document_heats.credential_id now points at the new
     credential, so a lookup keyed off that column would have lost the
     old credential's provenance the moment it was superseded."""
-    _login_org_user(client, conn)
-    doc_id, heat_id, cred_id = _upload_review_issue(client)
+    org_id = _login_org_user(client, conn)
+    key_id, private_key = make_issuer_key_synced_with_legacy_column(conn, org_id)
+    doc_id, heat_id, cred_id = _upload_review_issue(client, private_key, key_id)
     client.post(
         f"/documents/{doc_id}/heats/{heat_id}/correct",
         json={"target": "heat", "field_name": "mass_kg", "corrected_value": "55.0"},
     )
-    reissued = client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "collected_scrap_lot",
-            "heat_id": heat_id,
-            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States", "mass_kg": 55.0},
-            "sources": [],
-        },
+    reissued = issue_via_api(
+        client, private_key, key_id,
+        credential_type="collected_scrap_lot",
+        heat_id=heat_id,
+        subject={"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States", "mass_kg": 55.0},
+        sources=[],
     )
     new_cred_id = reissued.json()["id"]
 
@@ -334,16 +332,20 @@ def test_reissue_requires_org_match(client, conn):
     make_user(conn, "b@example.com", "pw", "org_user", org_b)
 
     client.post("/auth/login", json={"email": "a@example.com", "password": "pw"})
-    doc_id, heat_id, cred_id = _upload_review_issue(client)
+    key_id, private_key = make_issuer_key_synced_with_legacy_column(conn, org_a)
+    doc_id, heat_id, cred_id = _upload_review_issue(client, private_key, key_id)
     client.post(
         f"/documents/{doc_id}/heats/{heat_id}/correct",
         json={"target": "heat", "field_name": "mass_kg", "corrected_value": "55.0"},
     )
     client.post("/auth/logout")
 
+    # org B has no key at all for this issuer and never needs one --
+    # require_owned_heat_by_id rejects it inside prepare, before
+    # anything about signing is reached.
     client.post("/auth/login", json={"email": "b@example.com", "password": "pw"})
     resp = client.post(
-        "/credentials/issue",
+        "/credentials/issue/prepare",
         json={
             "credential_type": "collected_scrap_lot",
             "heat_id": heat_id,
@@ -358,16 +360,15 @@ def test_reissue_requires_org_match(client, conn):
 
 
 def test_composite_credential_sourcing_revoked_credential_shows_revoked(client, conn):
-    _login_org_user(client, conn)
-    doc_id, heat_id, component_id = _upload_review_issue(client)
+    org_id = _login_org_user(client, conn)
+    key_id, private_key = make_issuer_key_synced_with_legacy_column(conn, org_id)
+    doc_id, heat_id, component_id = _upload_review_issue(client, private_key, key_id)
 
-    composite = client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "sintered_ndfeb_batch",
-            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
-            "sources": [component_id],
-        },
+    composite = issue_via_api(
+        client, private_key, key_id,
+        credential_type="sintered_ndfeb_batch",
+        subject={"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
+        sources=[component_id],
     )
     assert composite.status_code == 200
     composite_id = composite.json()["id"]
@@ -398,20 +399,19 @@ def test_composite_with_one_of_two_sources_revoked_distinguishes_at_node_level(c
     "revoked" — proving the graph walk evaluates each source
     independently rather than a blanket revoke propagating to every
     node under the composite."""
-    _login_org_user(client, conn)
-    doc_a, heat_a, component_a = _upload_review_issue(client, filename="lot-a.txt", mass_kg=410.0)
-    doc_b, heat_b, component_b = _upload_review_issue(client, filename="lot-b.txt", mass_kg=165.0)
+    org_id = _login_org_user(client, conn)
+    key_id, private_key = make_issuer_key_synced_with_legacy_column(conn, org_id)
+    doc_a, heat_a, component_a = _upload_review_issue(client, private_key, key_id, filename="lot-a.txt", mass_kg=410.0)
+    doc_b, heat_b, component_b = _upload_review_issue(client, private_key, key_id, filename="lot-b.txt", mass_kg=165.0)
 
-    composite = client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "sintered_ndfeb_batch",
-            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
-            "sources": [component_a, component_b],
-            "segregation_attested": True,
-            "segregation_attested_by": "Maria Alvarez, QA Lead",
-            "segregation_note": "dedicated single-line sintering",
-        },
+    composite = issue_via_api(
+        client, private_key, key_id,
+        credential_type="sintered_ndfeb_batch",
+        subject={"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
+        sources=[component_a, component_b],
+        segregation_attested=True,
+        segregation_attested_by="Maria Alvarez, QA Lead",
+        segregation_note="dedicated single-line sintering",
     )
     assert composite.status_code == 200, composite.text
     composite_id = composite.json()["id"]

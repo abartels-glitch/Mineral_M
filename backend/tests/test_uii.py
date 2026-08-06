@@ -10,6 +10,7 @@ import crypto_utils
 import main
 import storage
 import uii
+from _issuance_helpers import issue_via_api, make_issuer_key
 from db import SCHEMA
 
 
@@ -66,14 +67,13 @@ def make_user(conn, email, password, role, org_id=None):
     return user_id
 
 
-def _issue_credential(client):
-    return client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "collected_scrap_lot",
-            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
-            "sources": [],
-        },
+def _issue_credential(client, conn, org_id):
+    key_id, private_key = make_issuer_key(conn, org_id)
+    return issue_via_api(
+        client, private_key, key_id,
+        credential_type="collected_scrap_lot",
+        subject={"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
+        sources=[],
     ).json()
 
 
@@ -82,7 +82,7 @@ def test_uii_binding_created_at_issuance_and_routes_work(client, conn):
     make_user(conn, "u@example.com", "pw", "org_user", org_id)
     client.post("/auth/login", json={"email": "u@example.com", "password": "pw"})
 
-    cred = _issue_credential(client)
+    cred = _issue_credential(client, conn, org_id)
 
     binding_row = conn.execute("SELECT * FROM uii_bindings WHERE credential_id = ?", (cred["id"],)).fetchone()
     assert binding_row is not None
@@ -104,7 +104,7 @@ def test_uii_routes_are_public_no_login_required(client, conn):
     org_id = make_issuer(conn)
     make_user(conn, "u@example.com", "pw", "org_user", org_id)
     client.post("/auth/login", json={"email": "u@example.com", "password": "pw"})
-    cred = _issue_credential(client)
+    cred = _issue_credential(client, conn, org_id)
     client.post("/auth/logout")
 
     assert client.get(f"/credentials/{cred['id']}/uii").status_code == 200
@@ -127,8 +127,8 @@ def _login_org_user(client, conn, iac=None, enterprise_id=None):
 
 
 def test_issuance_generates_real_construct_1_uii_when_issuer_has_iac_and_eid(client, conn):
-    _login_org_user(client, conn, iac="UN", enterprise_id="123456789")
-    cred = _issue_credential(client)
+    org_id = _login_org_user(client, conn, iac="UN", enterprise_id="123456789")
+    cred = _issue_credential(client, conn, org_id)
 
     binding_row = conn.execute(
         "SELECT uii_code FROM uii_bindings WHERE credential_id = ?", (cred["id"],)
@@ -139,8 +139,8 @@ def test_issuance_generates_real_construct_1_uii_when_issuer_has_iac_and_eid(cli
 
 
 def test_issuance_falls_back_to_legacy_uii_code_when_issuer_has_no_iac(client, conn):
-    _login_org_user(client, conn)  # no iac/enterprise_id registered
-    cred = _issue_credential(client)
+    org_id = _login_org_user(client, conn)  # no iac/enterprise_id registered
+    cred = _issue_credential(client, conn, org_id)
 
     binding_row = conn.execute(
         "SELECT uii_code FROM uii_bindings WHERE credential_id = ?", (cred["id"],)
@@ -149,8 +149,8 @@ def test_issuance_falls_back_to_legacy_uii_code_when_issuer_has_no_iac(client, c
 
 
 def test_passport_url_query_param_carries_the_real_uii_not_the_raw_credential_id(client, conn):
-    _login_org_user(client, conn, iac="UN", enterprise_id="123456789")
-    cred = _issue_credential(client)
+    org_id = _login_org_user(client, conn, iac="UN", enterprise_id="123456789")
+    cred = _issue_credential(client, conn, org_id)
 
     binding_resp = client.get(f"/credentials/{cred['id']}/uii").json()
     expected_bare_uii = uii.generate_uii("UN", "123456789", cred["id"])
@@ -164,8 +164,8 @@ def test_passport_url_query_param_carries_the_real_uii_not_the_raw_credential_id
 
 
 def test_scan_lookup_resolves_a_real_construct_1_uii(client, conn):
-    _login_org_user(client, conn, iac="UN", enterprise_id="123456789")
-    cred = _issue_credential(client)
+    org_id = _login_org_user(client, conn, iac="UN", enterprise_id="123456789")
+    cred = _issue_credential(client, conn, org_id)
 
     real_uii_scan_payload = uii.wrap_scan_payload(uii.generate_uii("UN", "123456789", cred["id"]))
     resp = client.get(f"/passport/{quote(real_uii_scan_payload, safe='')}")
@@ -174,8 +174,8 @@ def test_scan_lookup_resolves_a_real_construct_1_uii(client, conn):
 
 
 def test_scan_lookup_still_resolves_legacy_bare_credential_id(client, conn):
-    _login_org_user(client, conn)  # no iac/enterprise_id -> legacy uii_code
-    cred = _issue_credential(client)
+    org_id = _login_org_user(client, conn)  # no iac/enterprise_id -> legacy uii_code
+    cred = _issue_credential(client, conn, org_id)
 
     resp = client.get(f"/passport/{cred['id']}")
     assert resp.status_code == 200
@@ -194,8 +194,8 @@ def test_spoofed_well_formed_uii_that_was_never_issued_404s_not_false_match(clie
     a real registered issuer prefix but a serial that was never actually
     issued, must 404 as not-found — never resolve to some other
     credential, even one issued under the exact same issuer prefix."""
-    _login_org_user(client, conn, iac="UN", enterprise_id="123456789")
-    real_cred = _issue_credential(client)  # a real credential DOES exist under this issuer
+    org_id = _login_org_user(client, conn, iac="UN", enterprise_id="123456789")
+    real_cred = _issue_credential(client, conn, org_id)  # a real credential DOES exist under this issuer
 
     spoofed_bare = uii.generate_uii("UN", "123456789", "f" * 32)  # never-issued serial
     real_bare = uii.generate_uii("UN", "123456789", real_cred["id"])
@@ -206,8 +206,8 @@ def test_spoofed_well_formed_uii_that_was_never_issued_404s_not_false_match(clie
 
 
 def test_audit_trail_marks_legacy_resolution_distinctly_from_real_uii_resolution(client, conn):
-    _login_org_user(client, conn, iac="UN", enterprise_id="123456789")
-    cred = _issue_credential(client)
+    org_id = _login_org_user(client, conn, iac="UN", enterprise_id="123456789")
+    cred = _issue_credential(client, conn, org_id)
     real_uii_scan_payload = uii.wrap_scan_payload(uii.generate_uii("UN", "123456789", cred["id"]))
 
     client.get(f"/passport/{quote(real_uii_scan_payload, safe='')}")  # real Construct #1 UII lookup

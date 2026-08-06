@@ -37,6 +37,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from _issuance_helpers import issue_via_api
+
 pytestmark = pytest.mark.slow
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -57,14 +59,21 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _bootstrap_org(data_dir: Path) -> None:
-    """Creates the schema plus one issuer + one org_user directly via
-    SQL, before the subprocess starts -- the same shape as the rest of
-    the suite's make_issuer/make_user helpers, just against a real file
-    DB instead of a shared in-memory one."""
+def _bootstrap_org(data_dir: Path):
+    """Creates the schema plus one issuer + one org_user + one real
+    (non-legacy) active signing key directly via SQL, before the
+    subprocess starts -- the same shape as the rest of the suite's
+    make_issuer/make_user helpers, just against a real file DB instead
+    of a shared in-memory one. Returns (key_id, private_key) so the
+    tests driving the subprocess over HTTP can sign prepare's bytes
+    themselves, exactly like Stage 5's browser will."""
     sys.path.insert(0, str(BACKEND_DIR))
+    import base64
+
     import auth as auth_module
     import crypto_utils
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from db import SCHEMA
 
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -88,19 +97,37 @@ def _bootstrap_org(data_dir: Path) -> None:
         "INSERT INTO users (id, org_id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, 'org_user', datetime('now'))",
         ("user-race-test", "issuer-race-test", "race@example.com", auth_module.hash_password("pw")),
     )
+
+    key_id = "race-test-key-1"
+    private_key = Ed25519PrivateKey.generate()
+    signing_public_key_b64 = base64.b64encode(
+        private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw
+        )
+    ).decode("ascii")
+    conn.execute(
+        """
+        INSERT INTO issuer_keys (issuer_id, key_id, public_key, valid_from, valid_to, revoked_at, registered_by, created_at)
+        VALUES ('issuer-race-test', ?, ?, datetime('now'), NULL, NULL, 'test', datetime('now'))
+        """,
+        (key_id, signing_public_key_b64),
+    )
     conn.commit()
     conn.close()
+    return key_id, private_key
 
 
 @pytest.fixture(scope="module")
 def live_server(tmp_path_factory):
-    """Yields (base_url, data_dir). data_dir is exposed so tests that
-    need to seed state with no HTTP path (e.g. two independently open
-    heat-level flags for the #1 CAS-retry test) can reach the same
-    on-disk DB file the subprocess is serving, exactly as the live
-    investigation did against the real dev DB."""
+    """Yields (base_url, data_dir, key_id, private_key). data_dir is
+    exposed so tests that need to seed state with no HTTP path (e.g.
+    two independently open heat-level flags for the #1 CAS-retry test)
+    can reach the same on-disk DB file the subprocess is serving,
+    exactly as the live investigation did against the real dev DB.
+    key_id/private_key are the real signing key _bootstrap_org seeded,
+    needed by every test that issues a credential over HTTP."""
     data_dir = tmp_path_factory.mktemp("concurrency-data")
-    _bootstrap_org(data_dir)
+    key_id, private_key = _bootstrap_org(data_dir)
     port = _free_port()
     env = dict(os.environ)
     env["FEOC_DATA_DIR"] = str(data_dir)
@@ -123,7 +150,7 @@ def live_server(tmp_path_factory):
         else:
             proc.terminate()
             raise RuntimeError("live_server subprocess did not start in time")
-        yield base_url, data_dir
+        yield base_url, data_dir, key_id, private_key
     finally:
         proc.terminate()
         try:
@@ -134,15 +161,24 @@ def live_server(tmp_path_factory):
 
 @pytest.fixture
 def client(live_server):
-    base_url, _data_dir = live_server
+    base_url, _data_dir, _key_id, _private_key = live_server
     c = httpx.Client(base_url=base_url, timeout=10.0)
     r = c.post("/auth/login", json={"email": "race@example.com", "password": "pw"})
     assert r.status_code == 200, r.text
     return c
 
 
+@pytest.fixture
+def signing_key(live_server):
+    """(key_id, private_key) for the one real signing key _bootstrap_org
+    seeded -- every test that issues a credential over HTTP needs this
+    now, same cutover as everywhere else in the suite."""
+    _base_url, _data_dir, key_id, private_key = live_server
+    return key_id, private_key
+
+
 def _db_conn(live_server) -> sqlite3.Connection:
-    _base_url, data_dir = live_server
+    _base_url, data_dir, _key_id, _private_key = live_server
     conn = sqlite3.connect(data_dir / "passport.db")
     conn.row_factory = sqlite3.Row
     return conn
@@ -173,21 +209,19 @@ def _upload_review(client, n):
     return doc_id, heat_id
 
 
-def _upload_review_issue(client, n):
+def _upload_review_issue(client, n, key_id, private_key):
     doc_id, heat_id = _upload_review(client, n)
-    r = client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "collected_scrap_lot",
-            "heat_id": heat_id,
-            "subject": {
-                "material_type": "Sintered NdFeB Magnet Alloy (N42)",
-                "origin_country": "United States",
-                "mass_kg": 50.0,
-                "heat_number": n,
-            },
-            "sources": [],
+    r = issue_via_api(
+        client, private_key, key_id,
+        credential_type="collected_scrap_lot",
+        heat_id=heat_id,
+        subject={
+            "material_type": "Sintered NdFeB Magnet Alloy (N42)",
+            "origin_country": "United States",
+            "mass_kg": 50.0,
+            "heat_number": n,
         },
+        sources=[],
     )
     assert r.status_code == 200, r.text
     return doc_id, heat_id, r.json()["id"]
@@ -213,23 +247,22 @@ def _fire_concurrent(fns):
 # --- #3: two concurrent /credentials/issue from the same heat ---------------
 
 
-def test_concurrent_credential_issue_only_one_wins(client):
+def test_concurrent_credential_issue_only_one_wins(client, signing_key):
+    key_id, private_key = signing_key
     doc_id, heat_id = _upload_review(client, "issue-race-" + str(id(client)))
 
     def issue(tag):
-        return client.post(
-            "/credentials/issue",
-            json={
-                "credential_type": "collected_scrap_lot",
-                "heat_id": heat_id,
-                "subject": {
-                    "material_type": "Sintered NdFeB Magnet Alloy (N42)",
-                    "origin_country": "United States",
-                    "mass_kg": 50.0,
-                    "heat_number": tag,
-                },
-                "sources": [],
+        return issue_via_api(
+            client, private_key, key_id,
+            credential_type="collected_scrap_lot",
+            heat_id=heat_id,
+            subject={
+                "material_type": "Sintered NdFeB Magnet Alloy (N42)",
+                "origin_country": "United States",
+                "mass_kg": 50.0,
+                "heat_number": tag,
             },
+            sources=[],
         )
 
     # Fire enough concurrent attempts that the (narrow, timing-dependent)
@@ -420,8 +453,9 @@ def test_concurrent_object_and_scalar_field_corrections_both_resolve_their_flag(
 # --- #4: correction-triggered auto-revoke racing another correction ---------
 
 
-def test_concurrent_corrections_revoke_credential_exactly_once(client, live_server):
-    doc_id, heat_id, cred_id = _upload_review_issue(client, "revoke-race-" + str(id(client)))
+def test_concurrent_corrections_revoke_credential_exactly_once(client, live_server, signing_key):
+    key_id, private_key = signing_key
+    doc_id, heat_id, cred_id = _upload_review_issue(client, "revoke-race-" + str(id(client)), key_id, private_key)
 
     results = _fire_concurrent([
         lambda: client.post(

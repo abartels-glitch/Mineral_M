@@ -9,6 +9,7 @@ import auth
 import crypto_utils
 import main
 import storage
+from _issuance_helpers import issue_via_api, make_issuer_key
 from db import SCHEMA
 
 MTR_TEXT = (
@@ -65,14 +66,13 @@ def make_user(conn, email, password, role, org_id=None):
     return user_id
 
 
-def _issue_bare_credential(client):
-    return client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "collected_scrap_lot",
-            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
-            "sources": [],
-        },
+def _issue_bare_credential(client, conn, org_id):
+    key_id, private_key = make_issuer_key(conn, org_id)
+    return issue_via_api(
+        client, private_key, key_id,
+        credential_type="collected_scrap_lot",
+        subject={"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
+        sources=[],
     ).json()
 
 
@@ -95,7 +95,7 @@ def test_org_user_cannot_see_other_orgs_trail(client, conn):
     make_user(conn, "b@example.com", "pw", "org_user", org_b)
 
     client.post("/auth/login", json={"email": "a@example.com", "password": "pw"})
-    cred = _issue_bare_credential(client)
+    cred = _issue_bare_credential(client, conn, org_a)
     client.post("/auth/logout")
 
     client.post("/auth/login", json={"email": "b@example.com", "password": "pw"})
@@ -107,7 +107,7 @@ def test_org_user_sees_own_trail(client, conn):
     org_id = make_issuer(conn)
     make_user(conn, "u@example.com", "pw", "org_user", org_id)
     client.post("/auth/login", json={"email": "u@example.com", "password": "pw"})
-    cred = _issue_bare_credential(client)
+    cred = _issue_bare_credential(client, conn, org_id)
 
     resp = client.get(f"/credentials/{cred['id']}/audit-trail")
     assert resp.status_code == 200
@@ -123,7 +123,7 @@ def test_cross_org_roles_see_any_trail(client, conn, role, org_id):
     make_user(conn, f"reader-{role}@example.com", "pw", role, org_id)
 
     client.post("/auth/login", json={"email": "a@example.com", "password": "pw"})
-    cred = _issue_bare_credential(client)
+    cred = _issue_bare_credential(client, conn, org_a)
     client.post("/auth/logout")
 
     client.post("/auth/login", json={"email": f"reader-{role}@example.com", "password": "pw"})
@@ -135,6 +135,7 @@ def test_document_history_and_heat_provenance(client, conn):
     org_id = make_issuer(conn)
     make_user(conn, "u@example.com", "pw", "org_user", org_id)
     client.post("/auth/login", json={"email": "u@example.com", "password": "pw"})
+    key_id, private_key = make_issuer_key(conn, org_id)
 
     upload = client.post(
         "/documents/upload",
@@ -156,14 +157,12 @@ def test_document_history_and_heat_provenance(client, conn):
         },
     )
 
-    cred = client.post(
-        "/credentials/issue",
-        json={
-            "credential_type": "collected_scrap_lot",
-            "heat_id": heat_id,
-            "subject": {"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
-            "sources": [],
-        },
+    cred = issue_via_api(
+        client, private_key, key_id,
+        credential_type="collected_scrap_lot",
+        heat_id=heat_id,
+        subject={"material_type": "Sintered NdFeB Magnet Alloy (N42)", "origin_country": "United States"},
+        sources=[],
     ).json()
 
     resp = client.get(f"/credentials/{cred['id']}/audit-trail")
