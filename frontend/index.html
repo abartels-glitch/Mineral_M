@@ -163,6 +163,14 @@
   // resolved flags stay in the list (compliance history), they just stop
   // competing with what still needs a reviewer's attention.
   const SEVERITY_ORDER = { blocking: 0, needs_review: 1 };
+  // Extraction (the LLM's own read) and compliance_engine (main.py's
+  // deterministic per-sub-lot check) independently notice the same kind
+  // of thing -- e.g. a covered-country origin -- and each produces its
+  // own flag. They aren't guaranteed to correspond 1:1 to the same
+  // sub-lot once a heat has more than one (extraction's flags carry no
+  // sublot_id at all), so this list never merges them; "detected by"
+  // is how a reviewer tells the two apart instead of assuming a match.
+  const FLAG_SOURCE_LABELS = { extraction: "extraction", compliance_engine: "compliance engine" };
   function renderFlagList(flags) {
     if (!flags || !flags.length) return null;
     const sorted = [...flags].sort((a, b) => {
@@ -174,14 +182,15 @@
     const items = sorted.map((f) => {
       const resolved = f.status === "resolved";
       const severityPillClass = resolved ? "ar-pill-resolved" : f.severity === "blocking" ? "ar-pill-blocking" : "ar-pill-needs-review";
+      const sourceLabel = `detected by: ${FLAG_SOURCE_LABELS[f.source] || f.source}`;
+      const detailText = `${f.issue_type}${f.field_name ? " · " + f.field_name : ""}`;
       return el("li", { class: `rq-flag-row${resolved ? " resolved" : ""}` }, [
         el("span", { class: `ar-pill ${severityPillClass}`, text: resolved ? "resolved" : f.severity.replace("_", " ") }),
         el("span", { class: "rq-flag-reason", text: f.human_readable_reason }),
+        el("span", { class: "rq-flag-meta", text: sourceLabel }),
         el("span", {
           class: "rq-flag-meta",
-          text: resolved
-            ? `${f.issue_type}${f.field_name ? " · " + f.field_name : ""} · resolved by ${f.resolved_by} at ${f.resolved_at}`
-            : `${f.issue_type}${f.field_name ? " · " + f.field_name : ""} · ${f.source}`,
+          text: resolved ? `${detailText} · resolved by ${f.resolved_by} at ${f.resolved_at}` : detailText,
         }),
       ]);
     });
@@ -212,8 +221,33 @@
     }
     if (!targets.length) return null;
 
+    // Both read-only branches below used to always render a "→ see
+    // sub-lot below" pointer row even though the sub-lot's own loop (below,
+    // same targets array) already renders the real editable row for the
+    // identical issue -- two rows for one fact, only one of them live. These
+    // sets identify exactly the cases where that duplicate is provably safe
+    // to drop: a compliance_engine flag's flattened heat-level copy always
+    // carries the same sublot_id as its sub-lot-owned original, so that
+    // match is exact. An extraction-sourced heat-level flag (sublot_id is
+    // null -- the LLM's schema can't name a sub-lot) has no such precise
+    // match; it's only safe to treat as "already covered below" when
+    // exactly one sub-lot has an open origin-related flag, i.e. there's no
+    // question which row it means. With more than one flagged sub-lot the
+    // pointer row stays, since collapsing it then would hide *which*
+    // sub-lot(s) still need attention (see FIX B: whether that ambiguity
+    // can ever be resolved is still open).
+    const openSublotFlagKeys = new Set(
+      targets.filter((t) => t.target === "sublot").map((t) => `${t.sublot.id}::${t.flag.field_name}`)
+    );
+    const openOriginSublotIds = new Set(
+      targets
+        .filter((t) => t.target === "sublot" && isOriginRelatedFieldName(t.flag.field_name))
+        .map((t) => t.sublot.id)
+    );
+
     const container = el("div", { class: "rq-correction-panel" });
     container.appendChild(el("h4", { text: "Correct flagged fields" }));
+    let rowsRendered = false;
 
     for (const { target, sublot, flag } of targets) {
       const label = target === "sublot" ? `Sub-lot ${sublot.sublot_id || sublot.id.slice(0, 6)} · ${flag.field_name}` : flag.field_name;
@@ -237,6 +271,10 @@
       // "presentation only" discipline as everywhere else this pass:
       // nothing shown is removed, only how densely it's shown changes.
       if (target === "heat" && flag.sublot_id) {
+        // The matching sub-lot's own copy of this exact (sublot_id,
+        // field_name) flag renders its own editable row later in this same
+        // loop -- this pointer would be pure duplication.
+        if (openSublotFlagKeys.has(`${flag.sublot_id}::${flag.field_name}`)) continue;
         container.appendChild(
           el("div", { class: "rq-correction-row" }, [
             el("span", { class: "rq-correction-label", text: label }),
@@ -248,10 +286,15 @@
             }),
           ])
         );
+        rowsRendered = true;
         continue;
       }
       if (target === "heat" && !HEAT_CORRECTABLE_FIELDS.includes(flag.field_name)) {
         const originRelated = isOriginRelatedFieldName(flag.field_name);
+        // Same dedup, for the sublot_id-less (extraction-sourced) origin
+        // flag -- only collapsible when exactly one sub-lot is in play, so
+        // "the sub-lot below" is unambiguous.
+        if (originRelated && openOriginSublotIds.size === 1) continue;
         container.appendChild(
           el("div", { class: "rq-correction-row" }, [
             el("span", { class: "rq-correction-label", text: label }),
@@ -265,6 +308,7 @@
             }),
           ])
         );
+        rowsRendered = true;
         continue;
       }
 
@@ -315,6 +359,7 @@
         );
         container.appendChild(editor.container);
         container.appendChild(saveBtn);
+        rowsRendered = true;
         continue;
       }
 
@@ -350,8 +395,16 @@
           saveBtn,
         ])
       );
+      rowsRendered = true;
     }
-    return container;
+    // Defensive, not expected to trigger today: dedup above only suppresses
+    // a heat-level row when a matching sub-lot row exists to replace it, and
+    // that sub-lot row always renders (target === "sublot" is never
+    // suppressed) -- so rowsRendered should always be true once targets.length
+    // is nonzero. Guards against the panel rendering as an empty shell
+    // (just the "Correct flagged fields" heading, no rows) if that
+    // invariant ever breaks.
+    return rowsRendered ? container : null;
   }
 
   function renderCorrectionHistory(trail) {

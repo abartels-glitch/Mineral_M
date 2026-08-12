@@ -151,6 +151,65 @@ def _two_missing_origin_sublots_heat():
     }
 
 
+def _two_covered_origin_sublots_heat():
+    """Three sub-lots on one heat: D1 and D3 both plainly state China
+    (covered), D2 states United States (clean). Modeled directly on a real
+    (non-mocked) llm_extractor.extract_structured call against equivalent
+    MTR text -- confirmed live, across three separate calls, that the
+    model consistently emits one heat-level flags entry per violating
+    sub-lot (never one entry combining both), each naming the specific
+    sub-lot in human_readable_reason ("Sub-lot D1 ... China", "Sub-lot D3
+    ... China"), both with field_name='origin_country' and sublot_id=None
+    (source='extraction' flags are always heat-scoped -- see
+    review_flags.py -- so there's no field on the flag itself connecting
+    a given entry to D1 vs. D3; only the free-text reason does, and nothing
+    in this codebase parses that text back into a sub-lot reference).
+    Exists to exercise _resolve_heat_level_origin_flags_if_all_sublots_clear
+    against a heat where more than one sub-lot must clear before it can
+    fire, not just the single-sub-lot case every other origin test here
+    covers."""
+    return {
+        "heat_id": "H-MULTI-COVERED",
+        "alloy_composition": {"Nd": 29.6, "Fe": 68.1, "B": 1.1, "Dy": 1.2},
+        "test_results": None,
+        "nonconformance_refs": [],
+        "feedstock_sublots": [
+            {"sublot_id": "D1", "blend_pct": 40.0, "origin_country": "China", "origin_confidence": "high", "notes": "broker-sourced scrap, plainly stated"},
+            {"sublot_id": "D2", "blend_pct": 35.0, "origin_country": "United States", "origin_confidence": "high", "notes": "domestically collected scrap"},
+            {"sublot_id": "D3", "blend_pct": 25.0, "origin_country": "China", "origin_confidence": "high", "notes": "broker-sourced scrap, second lot, plainly stated"},
+        ],
+        "segregation_attested": True,
+        "segregation_note": "Dedicated line; broker-sourced additions per sub-lots D1 and D3.",
+        "mass_kg": 180.0,
+        "confidence": 0.95,
+        "flags": [
+            {
+                "issue_type": "compliance_violation",
+                "field_name": "origin_country",
+                "severity": "blocking",
+                "human_readable_reason": "Sub-lot D1 lists China as country of origin (40% of batch). China is a covered country under relevant trade compliance frameworks.",
+                "source": "extraction",
+                "status": "open",
+                "resolved_by": None,
+                "resolved_at": None,
+                "sublot_id": None,
+            },
+            {
+                "issue_type": "compliance_violation",
+                "field_name": "origin_country",
+                "severity": "blocking",
+                "human_readable_reason": "Sub-lot D3 lists China as country of origin (25% of batch). China is a covered country under relevant trade compliance frameworks.",
+                "source": "extraction",
+                "status": "open",
+                "resolved_by": None,
+                "resolved_at": None,
+                "sublot_id": None,
+            },
+        ],
+        "source": "llm",
+    }
+
+
 def _missing_origin_heat():
     """Sub-lot with no stated origin — main.py's own deterministic
     _evaluate_sublot_flag (source='compliance_engine') is what flags
@@ -372,6 +431,82 @@ def test_correct_one_sublot_does_not_affect_sibling_sublots_identical_flag(clien
     # heat still flagged overall (B2 unresolved) and not fully addressed
     assert updated["flagged_for_review"] is True
     assert updated["fully_addressed"] is False
+
+
+def test_heat_level_extraction_flag_waits_for_every_covered_sublot_before_resolving(client, conn, monkeypatch):
+    """Multi-sub-lot version of the Flag A / Flag B relationship: heat
+    H-MULTI-COVERED has two independently-flagged China sub-lots (D1, D3)
+    plus a clean US one (D2), and two heat-level Flag A entries (source=
+    extraction, sublot_id=None) -- one per violating sub-lot, per the real
+    LLM behavior _two_covered_origin_sublots_heat's docstring records.
+
+    Correcting only D1 must NOT resolve either Flag A: D3's own
+    compliance_engine flag is still open, so
+    _resolve_heat_level_origin_flags_if_all_sublots_clear's "all sub-lots
+    clear" gate stays False. Only once D3 is also corrected -- the last
+    of the two covered sub-lots -- do both Flag A entries resolve, in the
+    same request, since the function doesn't try to match a specific
+    Flag A to a specific sub-lot (see the docstring on why it can't); it
+    resolves every open origin-related extraction flag on the heat once
+    the aggregate condition is met."""
+    _login_org_user(client, conn)
+    upload = _upload_mocked(client, monkeypatch, [_two_covered_origin_sublots_heat()]).json()
+    doc_id = upload["id"]
+    heat = upload["heats"][0]
+    d1 = next(s for s in heat["sublots"] if s["sublot_id"] == "D1")
+    d2 = next(s for s in heat["sublots"] if s["sublot_id"] == "D2")
+    d3 = next(s for s in heat["sublots"] if s["sublot_id"] == "D3")
+
+    assert d1["origin_country"] == "China" and d1["flagged"] is True
+    assert d2["origin_country"] == "United States" and d2["flagged"] is False
+    assert d3["origin_country"] == "China" and d3["flagged"] is True
+
+    flag_a_entries = [f for f in heat["flags"] if f["source"] == "extraction" and f["sublot_id"] is None]
+    assert len(flag_a_entries) == 2
+    assert all(f["status"] == "open" for f in flag_a_entries)
+    assert any("D1" in f["human_readable_reason"] for f in flag_a_entries)
+    assert any("D3" in f["human_readable_reason"] for f in flag_a_entries)
+
+    # Correct D1 only -- D3 is still an open compliance_engine violation.
+    resp = client.post(
+        f"/documents/{doc_id}/heats/{heat['id']}/correct",
+        json={"target": "sublot", "sublot_id": d1["id"], "field_name": "origin_country", "corrected_value": "United States"},
+    )
+    assert resp.status_code == 200
+    after_d1 = resp.json()
+    updated_d1 = next(s for s in after_d1["sublots"] if s["id"] == d1["id"])
+    updated_d3 = next(s for s in after_d1["sublots"] if s["id"] == d3["id"])
+    assert updated_d1["flagged"] is False
+    assert updated_d3["flagged"] is True
+
+    flag_a_after_d1 = [f for f in after_d1["flags"] if f["source"] == "extraction" and f["sublot_id"] is None]
+    assert len(flag_a_after_d1) == 2
+    assert all(f["status"] == "open" for f in flag_a_after_d1), (
+        "Flag A resolved prematurely after only one of two covered sub-lots was corrected"
+    )
+    assert after_d1["flagged_for_review"] is True
+    assert after_d1["fully_addressed"] is False
+
+    # Correct D3 -- the last covered sub-lot. Now both Flag A entries
+    # should resolve, since the aggregate condition is finally satisfied.
+    resp = client.post(
+        f"/documents/{doc_id}/heats/{heat['id']}/correct",
+        json={"target": "sublot", "sublot_id": d3["id"], "field_name": "origin_country", "corrected_value": "United States"},
+    )
+    assert resp.status_code == 200
+    after_d3 = resp.json()
+    updated_d3_final = next(s for s in after_d3["sublots"] if s["id"] == d3["id"])
+    assert updated_d3_final["flagged"] is False
+
+    flag_a_after_d3 = [f for f in after_d3["flags"] if f["source"] == "extraction" and f["sublot_id"] is None]
+    assert len(flag_a_after_d3) == 2
+    assert all(f["status"] == "resolved" for f in flag_a_after_d3), (
+        "Flag A never resolved even after every covered sub-lot was corrected"
+    )
+    assert all(f["resolved_by"] == "u@example.com" for f in flag_a_after_d3)
+
+    assert after_d3["flagged_for_review"] is False
+    assert after_d3["fully_addressed"] is True
 
 
 # --- fully_addressed vs. reviewed --------------------------------------------
