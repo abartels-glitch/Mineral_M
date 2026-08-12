@@ -202,18 +202,19 @@
         const compositionText = heat.alloy_composition
           ? Object.entries(heat.alloy_composition).map(([k, v]) => `${k} ${v}%`).join(", ")
           : "not found";
-        const hasBlockingFlag = (heat.flags || []).some((f) => f.severity === "blocking");
+        const openHeatFlags = (heat.flags || []).filter((f) => f.status !== "resolved");
+        const hasBlockingFlag = openHeatFlags.some((f) => f.severity === "blocking");
         const flagText = hasBlockingFlag
-          ? `BLOCKING — ${heat.flags.map((f) => f.human_readable_reason).join("; ")}`
+          ? `BLOCKING — ${openHeatFlags.map((f) => f.human_readable_reason).join("; ")}`
           : heat.flagged_for_review
-          ? `FLAGGED — ${(heat.flags || []).map((f) => f.human_readable_reason).join("; ")}`
+          ? `FLAGGED — ${openHeatFlags.map((f) => f.human_readable_reason).join("; ")}`
           : "not flagged";
         summaryEl.textContent =
           `Heat ${heat.heat_id || "(no id found)"} · extracted via ${heat.extraction_source} · ${flagText} · ` +
           `composition: ${compositionText} · mass: ${heat.mass_kg ?? "—"} kg`;
 
         for (const sublot of heat.sublots) {
-          const sublotFlags = sublot.flags || [];
+          const sublotFlags = (sublot.flags || []).filter((f) => f.status !== "resolved");
           const worstSeverity = sublotFlags.some((f) => f.severity === "blocking") ? "blocking" : sublotFlags.length ? "needs_review" : null;
           const reasonText = sublotFlags.map((f) => f.human_readable_reason).join("; ") || "flagged";
           const rowClass = worstSeverity === "blocking" ? "blocking-row" : worstSeverity ? "flagged-row" : "";

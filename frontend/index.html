@@ -518,7 +518,7 @@
       ]);
       confidenceSelect.value = sublot.origin_confidence || "";
       const notesInput = el("input", { type: "text", value: sublot.notes || "", disabled: locked ? "disabled" : null });
-      const sublotFlags = sublot.flags || [];
+      const sublotFlags = (sublot.flags || []).filter((f) => f.status !== "resolved");
       const worstSeverity = sublotFlags.some((f) => f.severity === "blocking") ? "blocking" : sublotFlags.length ? "needs_review" : null;
       const statusLabel = sublotFlags.length > 1 ? `flagged (${sublotFlags.length})` : "flagged";
       const statusTag = worstSeverity === "blocking" ? tag("blocking", statusLabel) : worstSeverity ? tag("flagged", statusLabel) : tag("found", "ok");
