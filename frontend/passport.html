@@ -1,75 +1,85 @@
 <title>Passport Lookup — FEOC Compliance Passport</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="stylesheet" href="/style.css" />
-<link rel="stylesheet" href="/passport.css" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="stylesheet" href="/tokens.css" />
+<link rel="stylesheet" href="/components.css" />
+<link rel="stylesheet" href="/layout.css" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link
-  href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700;800&display=swap"
+  href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap"
   rel="stylesheet"
 />
 
-<body class="attestation-record">
+<body>
   <header id="header-root"></header>
 
   <main>
-    <div class="ar-lookup-strip">
-      <label for="credential-id" class="ar-lookup-label">Credential / UII</label>
-      <input type="text" id="credential-id" placeholder="e.g. 9f2c1a84… or a scanned UII" />
-      <button id="lookup-btn">Compile</button>
+    <h1 class="page-title">Passport lookup</h1>
+
+    <div class="lookup-strip">
+      <div class="field-group">
+        <label for="credential-id">Credential / UII</label>
+        <input type="text" id="credential-id" placeholder="e.g. 9f2c1a84… or a scanned UII" />
+      </div>
+      <button id="lookup-btn" class="btn btn--primary">Look up</button>
       <p class="error" id="lookup-error"></p>
     </div>
 
-    <p class="ar-empty-hint" id="empty-hint">
-      Enter a credential id or UII above, or open a shared passport link, to compile a full
-      chain-of-custody verification — signatures, revocation status, origin-country restrictions,
-      material scope, and attestations across the entire credential graph.
-    </p>
+    <div class="state-block" id="empty-hint">
+      <span class="state-block__icon">⛨</span>
+      <p class="state-block__title">No credential loaded</p>
+      <p class="state-block__body">
+        Enter a credential id or UII above, or open a shared passport link, to compile a full
+        chain-of-custody verification — signatures, revocation status, origin-country restrictions,
+        material scope, and attestations across the entire credential graph.
+      </p>
+    </div>
 
     <section id="result-panel" style="display: none">
-      <div class="ar-attestation" id="attestation-block">
-        <div class="ar-verdict-word" id="verdict-word"></div>
-        <hr class="ar-attestation-rule" />
-        <dl class="ar-attestation-fields" id="attestation-fields"></dl>
-        <div class="ar-signature-block" id="signature-block"></div>
+      <div class="attestation-block" id="attestation-block">
+        <div class="attestation-verdict" id="verdict-word"></div>
+        <hr class="attestation-rule" />
+        <dl class="attestation-fields" id="attestation-fields"></dl>
+        <div class="signature-block" id="signature-block"></div>
       </div>
 
-      <p style="margin: 0.85rem 0 1.5rem">
-        <a id="pdf-link" href="#" target="_blank">Download PDF report →</a>
+      <p style="margin: var(--space-3) 0 var(--space-5)">
+        <a id="pdf-link" href="#" target="_blank" class="btn btn--tertiary">Download PDF report</a>
       </p>
 
-      <h3 class="ar-section-label">Why</h3>
-      <ul id="reasons" class="ar-reasons"></ul>
+      <h3 class="section-label">Why</h3>
+      <ul id="reasons" class="reasons-list"></ul>
 
-      <div class="ar-split">
-        <div class="ar-custody">
-          <h3 class="ar-section-label">Chain of custody</h3>
-          <ul id="node-rows" class="ar-tree-list ar-tree-root"></ul>
+      <div class="detail-split">
+        <div>
+          <h3 class="section-label">Chain of custody</h3>
+          <ul id="node-rows" class="custody-tree"></ul>
         </div>
-        <div class="ar-uii-panel">
-          <h3 class="ar-section-label" style="margin-bottom: 0.7rem">UII / Data Matrix</h3>
-          <div class="ar-uii-tag">
+        <div class="uii-panel">
+          <h3 class="section-label" style="margin-bottom: var(--space-3)">UII / Data Matrix</h3>
+          <div class="uii-tag">
             <img id="datamatrix-img" alt="Data Matrix for this credential" />
           </div>
-          <p class="ar-uii-code" id="uii-code-text"></p>
-          <p><a id="datamatrix-link" href="#" target="_blank">View/download →</a></p>
+          <p class="uii-code" id="uii-code-text"></p>
+          <p><a id="datamatrix-link" href="#" target="_blank" class="btn btn--tertiary">View / download</a></p>
         </div>
       </div>
     </section>
 
     <section id="audit-panel" style="display: none">
-      <h3 class="ar-section-label">Audit trail</h3>
-      <p class="muted" style="margin: -0.4rem 0 1rem; font-size: 0.8rem">
+      <h3 class="section-label">Audit trail</h3>
+      <p class="muted" style="margin: calc(-1 * var(--space-2)) 0 var(--space-4)">
         Only visible to logged-in accounts — this is the extra depth a review beyond the public
         passport gets: who did what, when, and whether any extracted field was corrected by a
         human reviewer.
       </p>
       <div id="chain-note"></div>
-      <ol class="ar-timeline" id="audit-rows"></ol>
+      <ol class="timeline" id="audit-rows"></ol>
       <div id="provenance-block" style="display: none">
-        <h3 class="ar-section-label">Extraction &amp; review provenance</h3>
-        <p id="heat-summary" class="muted" style="margin-bottom: 1rem"></p>
-        <table class="ar-data-table">
+        <h3 class="section-label">Extraction &amp; review provenance</h3>
+        <p id="heat-summary" class="muted" style="margin-bottom: var(--space-4)"></p>
+        <table class="data-table">
           <thead>
             <tr>
               <th>Sub-lot</th>
@@ -77,7 +87,7 @@
               <th>Origin</th>
               <th>Confidence</th>
               <th>Notes</th>
-              <th>Status</th>
+              <th class="data-table__status">Status</th>
             </tr>
           </thead>
           <tbody id="sublot-rows"></tbody>
@@ -170,23 +180,51 @@
           ])
         );
       }
-      if (parts.length) container.appendChild(el("div", { class: "ar-chain-note" }, parts));
+      if (parts.length) container.appendChild(el("div", { class: "chain-note" }, parts));
+    }
+
+    // Every public GET /passport/{id} writes its own "passport_viewed" row
+    // (main.py's get_passport — always actor="unauthenticated", one per
+    // lookup, no batching). Listed individually, a part scanned regularly
+    // on a production line would bury the events that actually matter
+    // (corrections, reissues, revocations) under hundreds of identical
+    // rows. Collapsed here into a single summary line at the position of
+    // the most recent view — "when" stays genuinely the last-viewed time,
+    // and the count/first-viewed detail rides in the same detail column
+    // every other row already uses. Every other action still renders
+    // individually, unchanged; this is presentation-only, not a change to
+    // what's recorded.
+    function collapseViewEvents(entries) {
+      const views = entries.filter((e) => e.action === "passport_viewed");
+      if (views.length <= 1) return entries;
+      const rest = entries.filter((e) => e.action !== "passport_viewed");
+      const first = views[0];
+      const last = views[views.length - 1];
+      const summary = {
+        action: "passport_viewed",
+        actor: "unauthenticated",
+        created_at: last.created_at,
+        detail: { count: views.length, first_viewed_at: first.created_at },
+      };
+      return [...rest, summary].sort((a, b) => a.created_at.localeCompare(b.created_at));
     }
 
     function renderAuditTrail(trail) {
       renderChainNote(trail);
       const rows = document.getElementById("audit-rows");
       rows.innerHTML = "";
-      const entries = [...trail.audit_log, ...trail.document_audit_log, ...(trail.heat_audit_log || [])].sort((a, b) =>
-        a.created_at.localeCompare(b.created_at)
+      const entries = collapseViewEvents(
+        [...trail.audit_log, ...trail.document_audit_log, ...(trail.heat_audit_log || [])].sort((a, b) =>
+          a.created_at.localeCompare(b.created_at)
+        )
       );
       for (const entry of entries) {
         rows.appendChild(
-          el("li", { class: "ar-timeline-row" }, [
-            el("span", { class: "ar-timeline-when", text: entry.created_at }),
-            el("span", { class: "ar-timeline-action", text: entry.action }),
-            el("span", { class: "ar-timeline-actor", text: entry.actor }),
-            el("span", { class: "ar-timeline-detail", text: formatAuditDetail(entry.detail) }),
+          el("li", { class: "timeline-row" }, [
+            el("span", { class: "timeline-when mono", text: entry.created_at }),
+            el("span", { class: "timeline-action", text: entry.action }),
+            el("span", { class: "timeline-actor mono", text: entry.actor }),
+            el("span", { class: "timeline-detail", text: formatAuditDetail(entry.detail) }),
           ])
         );
       }
@@ -217,21 +255,18 @@
           const sublotFlags = (sublot.flags || []).filter((f) => f.status !== "resolved");
           const worstSeverity = sublotFlags.some((f) => f.severity === "blocking") ? "blocking" : sublotFlags.length ? "needs_review" : null;
           const reasonText = sublotFlags.map((f) => f.human_readable_reason).join("; ") || "flagged";
-          const rowClass = worstSeverity === "blocking" ? "blocking-row" : worstSeverity ? "flagged-row" : "";
+          const rowClass = worstSeverity === "blocking" ? "row--rejected" : worstSeverity ? "row--flagged" : "";
+          const statusKey = worstSeverity === "blocking" ? "rejected" : worstSeverity ? "flagged" : "verified";
+          const statusTag = el("span", { class: `status-chip status-chip--${statusKey}`, text: statusKey === "verified" ? "VERIFIED" : statusKey.toUpperCase() });
+          if (sublotFlags.length) statusTag.title = reasonText;
           sublotRows.appendChild(
             el("tr", { class: rowClass }, [
-              el("td", { class: "ar-mono", text: sublot.sublot_id || "—" }),
+              el("td", { class: "mono", text: sublot.sublot_id || "—" }),
               el("td", { text: sublot.blend_pct != null ? String(sublot.blend_pct) : "—" }),
               el("td", { text: sublot.origin_country || "—" }),
               el("td", { text: sublot.origin_confidence || "—" }),
               el("td", { text: sublot.notes || "—" }),
-              el("td", {}, [
-                worstSeverity === "blocking"
-                  ? el("span", { class: "tag tag-blocking", text: reasonText })
-                  : worstSeverity
-                  ? el("span", { class: "tag tag-flagged", text: reasonText })
-                  : el("span", { class: "tag tag-found", text: "ok" }),
-              ]),
+              el("td", { class: "data-table__status" }, [statusTag]),
             ])
           );
         }
@@ -240,8 +275,25 @@
       }
     }
 
+    // Domain vocabulary, not the generic workflow chip words — pass/fail/
+    // insufficient_data/revoked are the real compliance-verdict terms an
+    // auditor cares about (passport.py's NodeStatus), so the verdict chip
+    // keeps them verbatim rather than translating into VERIFIED/PENDING/
+    // FLAGGED/REJECTED. The chip's *color* still follows the app's one
+    // status-chip mapping below (verdictChipKey) for visual consistency.
     function verdictLabel(v) {
       return { pass: "PASS", fail: "FAIL", insufficient_data: "INSUFFICIENT DATA", revoked: "REVOKED" }[v] || v;
+    }
+
+    // revoked is deliberately not the same color as fail: fail means a
+    // check ran and found a real compliance problem; revoked means the
+    // credential was administratively retracted (its source changed after
+    // signing) — a procedural fact, not a compliance finding. Only 4 chip
+    // colors exist app-wide, so this is the interpretive call that fits
+    // both into that budget: fail -> rejected (the worst, a substantive
+    // violation), revoked -> flagged (needs attention, but administrative).
+    function verdictChipKey(v) {
+      return { pass: "verified", insufficient_data: "pending", fail: "rejected", revoked: "flagged" }[v] || "flagged";
     }
 
     // Signature is stored/served base64-encoded (crypto_utils.sign_payload).
@@ -264,8 +316,10 @@
 
     function renderAttestationBlock(result) {
       const verdictWord = document.getElementById("verdict-word");
-      verdictWord.textContent = verdictLabel(result.verdict);
-      verdictWord.className = `ar-verdict-word ${result.verdict}`;
+      verdictWord.innerHTML = "";
+      verdictWord.appendChild(
+        el("span", { class: `status-chip status-chip--lg status-chip--${verdictChipKey(result.verdict)}`, text: verdictLabel(result.verdict) })
+      );
 
       const fields = document.getElementById("attestation-fields");
       fields.innerHTML = "";
@@ -277,10 +331,20 @@
       };
       addField("Credential", document.createTextNode(result.credential_id));
 
+      // Origin/material scope surfaced right under the credential id — the
+      // inverted-pyramid ask (status, then origin/material scope, then
+      // signatures, then full chain-of-custody below the fold). Sourced
+      // from the root node (result.nodes[0], same node renderCustodyTree
+      // treats as root) since the public /passport response has no
+      // top-level material_type/origin_country of its own.
+      const rootNode = result.nodes && result.nodes[0];
+      if (rootNode && rootNode.material_type) addField("Material", document.createTextNode(rootNode.material_type));
+      if (rootNode && rootNode.origin_country) addField("Origin country", document.createTextNode(rootNode.origin_country));
+
       if (result.issuer_name) {
         const issuerNode = document.createDocumentFragment();
         issuerNode.appendChild(document.createTextNode(result.issuer_name));
-        issuerNode.appendChild(el("span", { class: "ar-issuer-verified", text: "✓ verified" }));
+        issuerNode.appendChild(el("span", { class: "attestation-verified-badge", text: "✓ verified" }));
         addField("Issuer", issuerNode);
       }
 
@@ -302,7 +366,7 @@
       const hexSig = result.signature ? base64ToHexGroups(result.signature) : null;
       if (hexSig) {
         sigBlock.appendChild(el("dt", { text: "Signature" }));
-        sigBlock.appendChild(el("p", { class: "ar-signature-hex", text: hexSig }));
+        sigBlock.appendChild(el("p", { class: "signature-hex", text: hexSig }));
       }
     }
 
@@ -326,17 +390,17 @@
 
     function buildTreeRow(node) {
       const meta = [node.material_type, node.origin_country].filter(Boolean).join(" · ");
-      return el("div", { class: `ar-tree-row ${node.node_status}` }, [
-        el("span", { class: "ar-tree-id", text: node.credential_id.slice(0, 12) + "…" }),
-        el("div", { class: "ar-tree-main" }, [
-          el("div", { class: "ar-tree-type", text: node.credential_type }),
-          meta ? el("div", { class: "ar-tree-meta", text: meta }) : null,
+      return el("div", { class: `custody-tree-row custody-tree-row--${verdictChipKey(node.node_status)}` }, [
+        el("span", { class: "custody-tree-id mono", text: node.credential_id.slice(0, 12) + "…" }),
+        el("div", { class: "custody-tree-main" }, [
+          el("div", { class: "custody-tree-type", text: node.credential_type }),
+          meta ? el("div", { class: "custody-tree-meta", text: meta }) : null,
           node.reasons && node.reasons.length
-            ? el("div", { class: "ar-tree-reasons", text: node.reasons.join("; ") })
+            ? el("div", { class: "custody-tree-reasons", text: node.reasons.join("; ") })
             : null,
         ]),
-        el("span", { class: "ar-tree-status" }, [
-          el("span", { class: `ar-status-pill ${node.node_status}`, text: verdictLabel(node.node_status) }),
+        el("span", { class: "custody-tree-status" }, [
+          el("span", { class: `status-chip status-chip--${verdictChipKey(node.node_status)}`, text: verdictLabel(node.node_status) }),
         ]),
       ]);
     }
@@ -355,17 +419,17 @@
       const nextVisited = new Set(visited);
       nextVisited.add(nodeId);
 
-      const li = el("li", { class: "ar-tree-node" }, [buildTreeRow(node)]);
+      const li = el("li", {}, [buildTreeRow(node)]);
       const sources = node.sources || [];
       if (isRoot && sources.length === 0) {
         li.appendChild(
           el("p", {
-            class: "ar-single-origin-note",
+            class: "single-origin-note",
             text: "No additional sources — single-origin credential, not a composite.",
           })
         );
       } else if (sources.length) {
-        const childList = el("ul", { class: "ar-tree-list" });
+        const childList = el("ul", {});
         for (const sourceId of sources) {
           const childLi = buildTreeNode(nodesById, sourceId, nextVisited, false);
           if (childLi) childList.appendChild(childLi);

@@ -16,7 +16,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -30,6 +30,7 @@ import auth
 import crypto_utils
 import llm_extractor
 import ocr
+import org_config
 import passport as passport_engine
 import pdf_export
 import review_flags
@@ -37,6 +38,8 @@ import storage
 import uii
 from db import get_db, init_db
 from models import (
+    AcceptInviteRequest,
+    CreateOrgInviteRequest,
     CreateUserRequest,
     CredentialIssueRequest,
     CredentialIssueSubmitRequest,
@@ -47,9 +50,11 @@ from models import (
     FieldCorrectionRequest,
     HeatOut,
     HeatReviewRequest,
+    InvitePreview,
     IssuerKeyRegisterRequest,
     IssuerKeyResponse,
     LoginRequest,
+    OrgInviteResponse,
     PassportResult,
     SublotOut,
     UserOut,
@@ -127,7 +132,7 @@ def _evaluate_sublot_flag(sublot: dict, sublot_id: Optional[str] = None) -> list
 # assumption is exactly what turned out to be wrong for
 # alloy_composition/test_results before this dict grew to cover them),
 # but because it's genuinely a different shape: a list of strings
-# (llm_extractor.HEAT_SCHEMA's nonconformance_refs is `{"type": "array",
+# (llm_extractor._build_heat_schema()'s nonconformance_refs is `{"type": "array",
 # "items": {"type": "string"}}`), not a dict at all. Neither
 # buildKeyValueEditor's flat map nor buildTestResultsEditor's
 # name->{value,result} map fits a bare string list — it would need its
@@ -558,6 +563,137 @@ def create_user(body: CreateUserRequest, current_user: dict = Depends(auth.get_c
     return _user_out(conn, {"id": user_id, "org_id": body.org_id, "email": body.email, "role": body.role})
 
 
+@app.post("/admin/invites", response_model=OrgInviteResponse)
+def create_org_invite(
+    body: CreateOrgInviteRequest, current_user: dict = Depends(auth.get_current_user), conn=Depends(get_db)
+):
+    """Platform_admin-only -- the trust checkpoint for onboarding a new
+    org onto the platform is preserved exactly as before (an admin still
+    creates the org and generates the invite); the only thing this
+    changes from the old POST /admin/users-only flow is that the invitee
+    sets their own password via the resulting link, instead of the admin
+    inventing one and relaying it out-of-band. No email is sent -- there's
+    no email-sending infrastructure in this app -- the admin copies
+    invite_url from the response and sends it themselves."""
+    auth.require_role(current_user, "platform_admin")
+    if bool(body.org_id) == bool(body.new_org_name):
+        raise HTTPException(400, "exactly one of org_id or new_org_name is required")
+
+    if body.new_org_name:
+        org_id = uuid.uuid4().hex
+        # Legacy issuers.public_key/private_key_path are NOT NULL but
+        # unused going forward (issuer_keys is the sole source of truth
+        # for real key lookups -- see db.py's _migrate_issuer_keys
+        # comment); generated only to satisfy the column, exactly what
+        # seed.py does for every issuer it creates. Deliberately NOT
+        # followed by an issuer_keys insert: this org must start with
+        # zero active keys so register_issuer_key's existing "first key
+        # needs platform_admin" check (is_first = no issuer_keys rows
+        # yet, main.py's register_issuer_key) fires normally the first
+        # time anyone registers a real key for it -- new orgs get the
+        # same witnessed-first-key checkpoint as any other org, this
+        # flow doesn't bypass it.
+        public_key_b64, private_key_path = crypto_utils.generate_issuer_keypair(org_id)
+        conn.execute(
+            "INSERT INTO issuers (id, name, public_key, private_key_path, created_at) VALUES (?, ?, ?, ?, ?)",
+            (org_id, body.new_org_name, public_key_b64, private_key_path, now_iso()),
+        )
+        conn.commit()
+        audit.record(conn, "issuer", org_id, "created", actor=current_user["email"], detail={"name": body.new_org_name})
+        org_name = body.new_org_name
+    else:
+        org = conn.execute("SELECT id, name FROM issuers WHERE id = ?", (body.org_id,)).fetchone()
+        if org is None:
+            raise HTTPException(404, "org not found")
+        org_id, org_name = org["id"], org["name"]
+
+    invite_id = uuid.uuid4().hex
+    raw_token = auth.generate_invite_token()
+    created_at = now_iso()
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=auth.INVITE_TTL_DAYS)).isoformat()
+    conn.execute(
+        """
+        INSERT INTO org_invites (id, org_id, email, role, token_hash, invited_by, created_at, expires_at)
+        VALUES (?, ?, ?, 'org_user', ?, ?, ?, ?)
+        """,
+        (invite_id, org_id, body.email, auth.hash_invite_token(raw_token), current_user["email"], created_at, expires_at),
+    )
+    conn.commit()
+    audit.record(
+        conn, "org_invite", invite_id, "created", actor=current_user["email"],
+        detail={"org_id": org_id, "email": body.email},
+    )
+
+    return OrgInviteResponse(
+        id=invite_id,
+        org_id=org_id,
+        org_name=org_name,
+        email=body.email,
+        expires_at=expires_at,
+        invite_url=f"/accept-invite.html?token={raw_token}",
+    )
+
+
+def _load_open_invite(conn, token: str) -> sqlite3.Row:
+    """Shared lookup/validation for both invite endpoints below -- 404 for
+    an unrecognized token, 400 for one that's expired or already used, so
+    a fresh visitor to a stale link gets a clear reason either way rather
+    than the two endpoints drifting on what counts as "still open"."""
+    row = conn.execute("SELECT * FROM org_invites WHERE token_hash = ?", (auth.hash_invite_token(token),)).fetchone()
+    if row is None:
+        raise HTTPException(404, "invite not found")
+    if row["accepted_at"] is not None:
+        raise HTTPException(400, "this invite has already been used")
+    if datetime.fromisoformat(row["expires_at"]) < datetime.now(timezone.utc):
+        raise HTTPException(400, "this invite has expired")
+    return row
+
+
+@app.get("/invite/{token}", response_model=InvitePreview)
+def preview_invite(token: str, conn=Depends(get_db)):
+    """Public, pre-auth -- the accept-invite page's landing call. Narrow
+    response (org name + email + expiry only), same "don't leak more than
+    the caller needs" posture as the public GET /passport/{id}."""
+    row = _load_open_invite(conn, token)
+    org = conn.execute("SELECT name FROM issuers WHERE id = ?", (row["org_id"],)).fetchone()
+    return InvitePreview(org_name=org["name"] if org else "(unknown org)", email=row["email"], expires_at=row["expires_at"])
+
+
+@app.post("/invite/{token}/accept", response_model=UserOut)
+def accept_invite(token: str, body: AcceptInviteRequest, response: Response, conn=Depends(get_db)):
+    """Public, pre-auth. Same INSERT shape as create_user, just sourced
+    from the invite row instead of an admin-supplied org_id/email/role,
+    plus logs the new user in immediately (auth.create_session + cookie,
+    same pattern as POST /auth/login) so accepting an invite and being
+    ready to work are the same step."""
+    row = _load_open_invite(conn, token)
+
+    existing = conn.execute("SELECT id FROM users WHERE email = ?", (row["email"],)).fetchone()
+    if existing is not None:
+        raise HTTPException(409, "an account with this email already exists")
+
+    user_id = uuid.uuid4().hex
+    created_at = now_iso()
+    conn.execute(
+        "INSERT INTO users (id, org_id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, row["org_id"], row["email"], auth.hash_password(body.password), row["role"], created_at),
+    )
+    conn.execute(
+        "UPDATE org_invites SET accepted_at = ?, accepted_by_user_id = ? WHERE id = ?",
+        (created_at, user_id, row["id"]),
+    )
+    conn.commit()
+    audit.record(conn, "org_invite", row["id"], "accepted", actor=row["email"], detail={"user_id": user_id})
+    audit.record(conn, "user", user_id, "created", actor=row["email"], detail={"role": row["role"], "via": "invite"})
+
+    raw_session_token = auth.create_session(conn, user_id)
+    response.set_cookie(
+        auth.COOKIE_NAME, raw_session_token, httponly=True, samesite="lax", secure=False,
+        max_age=auth.SESSION_TTL_DAYS * 24 * 3600, path="/",
+    )
+    return _user_out(conn, {"id": user_id, "org_id": row["org_id"], "email": row["email"], "role": row["role"]})
+
+
 @app.get("/admin/extraction-stats")
 def extraction_stats(current_user: dict = Depends(auth.get_current_user), conn=Depends(get_db)):
     """How often extraction flagged a heat for review, by extraction
@@ -614,6 +750,17 @@ async def upload_document(
     conn=Depends(get_db),
 ):
     auth.require_role(current_user, "org_user")
+
+    org_cfg = org_config.load_config_for_issuer(conn, current_user["org_id"])
+    if document_type not in org_cfg["document_types"]:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"document_type '{document_type}' is not accepted for {org_cfg['org_name']} "
+                f"(expected one of: {', '.join(org_cfg['document_types'])})"
+            ),
+        )
+
     raw_bytes = await file.read()
 
     document_id = uuid.uuid4().hex
@@ -622,7 +769,7 @@ async def upload_document(
     content_hash = hashlib.sha256(raw_bytes).hexdigest()
     raw_text = ocr.extract_text(raw_bytes, file.filename)
 
-    structured = llm_extractor.extract_structured(raw_text)
+    structured = llm_extractor.extract_structured(raw_text, org_cfg)
 
     uploaded_at = now_iso()
     conn.execute(

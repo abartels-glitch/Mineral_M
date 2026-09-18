@@ -1,34 +1,20 @@
 <title>Signing Key — FEOC Compliance Passport</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="stylesheet" href="/style.css" />
-<link rel="stylesheet" href="/passport.css" />
-<link rel="stylesheet" href="/review.css" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="stylesheet" href="/tokens.css" />
+<link rel="stylesheet" href="/components.css" />
+<link rel="stylesheet" href="/layout.css" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link
-  href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700;800&display=swap"
+  href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap"
   rel="stylesheet"
 />
-<style>
-  .key-fields { display: grid; grid-template-columns: auto 1fr; gap: 0.4rem 1.2rem; margin: 0 0 1rem 0; }
-  .key-fields dt {
-    font-family: "IBM Plex Mono", monospace; font-size: 0.68rem; font-weight: 600;
-    letter-spacing: 0.05em; text-transform: uppercase; color: var(--slate); margin: 0;
-  }
-  .key-fields dd { font-family: "IBM Plex Mono", monospace; font-size: 0.85rem; margin: 0; word-break: break-word; }
-  .key-status-pill {
-    display: inline-block; font-family: "IBM Plex Mono", monospace; font-size: 0.68rem; font-weight: 700;
-    letter-spacing: 0.04em; text-transform: uppercase; padding: 0.15rem 0.5rem; border-radius: 3px; border: 1px solid;
-  }
-  .key-status-pill.registered { color: var(--attested); border-color: var(--attested); }
-  .key-status-pill.local-only { color: var(--insufficient); border-color: var(--insufficient); }
-  .key-status-pill.none { color: var(--slate); border-color: var(--rule-strong); }
-</style>
 
-<body class="attestation-record">
+<body>
   <header id="header-root"></header>
 
-  <main class="narrow">
+  <main class="main--narrow">
     <h1 class="page-title">Signing key</h1>
 
     <section class="panel" id="unsupported-panel" style="display: none">
@@ -54,7 +40,10 @@
 
     <section class="panel">
       <h2>Current key (this browser)</h2>
-      <p id="key-status-line"><span class="key-status-pill none" id="key-status-pill">checking…</span></p>
+      <p class="key-status-line" id="key-status-line">
+        <span class="status-chip" id="key-status-pill"></span>
+        <span class="muted" id="key-status-detail">checking…</span>
+      </p>
       <dl class="key-fields" id="key-fields" style="display: none">
         <dt>Key id</dt>
         <dd id="key-id-field">—</dd>
@@ -75,13 +64,19 @@
       <h2>Generate &amp; register a new signing key</h2>
       <p class="muted">
         Generates a fresh Ed25519 keypair in this browser and registers the public key with the
-        platform. This replaces this browser's local key — if one was already registered, the
-        previous key stops being valid for new issuance the moment this one is confirmed (its past
-        credentials remain fully verifiable either way).
+        platform.
       </p>
+      <div class="callout callout--rejected">
+        <span class="callout__icon">⚠</span>
+        <div class="callout__body">
+          <strong>This replaces this browser's local key.</strong> If one was already registered,
+          the previous key stops being valid for new issuance the moment this one is confirmed.
+          Its past credentials remain fully verifiable either way — only new signing stops.
+        </div>
+      </div>
       <label for="reauth-password">Confirm your password</label>
       <input type="password" id="reauth-password" autocomplete="current-password" />
-      <button id="generate-register-btn">Generate &amp; register new key</button>
+      <button id="generate-register-btn" class="btn btn--primary">Generate &amp; register new key</button>
       <p class="error" id="key-error"></p>
       <p class="success" id="key-success"></p>
     </section>
@@ -93,10 +88,18 @@
     let currentUser = null;
     let targetIssuerId = null;
 
-    function setStatusPill(state, label) {
+    // Same status-chip mapping the rest of the app uses (see index.html's
+    // heatStatusKey comment) — no backend endpoint reports "current key
+    // status" directly (see README/BUILD notes), this is derived entirely
+    // from what's stored in this browser (signing.js's getStoredKeyRecord).
+    const KEY_STATE_CHIP = { registered: "verified", "local-only": "pending", none: "flagged" };
+    const KEY_STATE_LABEL = { registered: "VERIFIED", "local-only": "PENDING", none: "FLAGGED" };
+
+    function setStatusPill(state, detail) {
       const pill = document.getElementById("key-status-pill");
-      pill.className = `key-status-pill ${state}`;
-      pill.textContent = label;
+      pill.className = `status-chip status-chip--${KEY_STATE_CHIP[state]}`;
+      pill.textContent = KEY_STATE_LABEL[state];
+      document.getElementById("key-status-detail").textContent = detail;
     }
 
     async function refreshKeyStatus() {

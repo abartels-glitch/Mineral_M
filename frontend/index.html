@@ -1,49 +1,116 @@
 <title>Review Queue — FEOC Compliance Passport</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="stylesheet" href="/style.css" />
-<link rel="stylesheet" href="/passport.css" />
-<link rel="stylesheet" href="/review.css" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="stylesheet" href="/tokens.css" />
+<link rel="stylesheet" href="/components.css" />
+<link rel="stylesheet" href="/layout.css" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link
-  href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700;800&display=swap"
+  href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap"
   rel="stylesheet"
 />
 
-<body class="attestation-record">
+<body>
 <header id="header-root"></header>
 
 <main>
   <h1 class="page-title">Review queue</h1>
 
-  <section class="panel">
-    <h2>Upload a certificate of conformance / MTR</h2>
-    <p class="muted">
-      Upload a mill test report or certificate of conformance. A single
-      certificate can cover one heat or several — each heat is reviewed
-      and issued as its own credential. PDFs are read directly from
-      their text content; scanned image-only PDFs aren't supported yet.
-      Plain text files also work.
-    </p>
-    <form id="upload-form">
-      <label for="upload-file">Document file (.pdf or .txt)</label>
-      <input type="file" id="upload-file" required />
-      <button type="submit">Upload &amp; extract</button>
-    </form>
-    <p class="error" id="upload-error"></p>
-  </section>
+  <div class="stat-strip">
+    <div class="stat-strip__tile">
+      <span class="stat-strip__value" id="stat-docs">0</span>
+      <span class="stat-strip__label">Documents</span>
+    </div>
+    <div class="stat-strip__tile">
+      <span class="stat-strip__value" id="stat-heats">0</span>
+      <span class="stat-strip__label">Heats</span>
+    </div>
+    <div class="stat-strip__tile">
+      <span class="stat-strip__value stat-strip__value--flagged" id="stat-needs-review">0</span>
+      <span class="stat-strip__label">Needs review</span>
+    </div>
+    <div class="stat-strip__tile">
+      <span class="stat-strip__value stat-strip__value--rejected" id="stat-blocking">0</span>
+      <span class="stat-strip__label">Blocking</span>
+    </div>
+    <div class="stat-strip__tile">
+      <span class="stat-strip__value stat-strip__value--verified" id="stat-issued">0</span>
+      <span class="stat-strip__label">Issued</span>
+    </div>
+  </div>
 
-  <div class="side-by-side">
+  <div class="queue-grid">
     <section class="panel">
       <h2>Documents</h2>
-      <ul class="doc-list" id="doc-list"></ul>
+      <p class="muted">
+        Certificate of conformance / MTR intake. Drop a mill test report or
+        certificate of conformance, or click to browse. A single
+        certificate can cover one heat or several — each heat is reviewed
+        and issued as its own credential. PDFs are read directly from
+        their text content; scanned image-only PDFs aren't supported yet.
+        Plain text files also work.
+      </p>
+      <form id="upload-form">
+        <div id="upload-dropzone" class="dropzone" tabindex="0" role="button" aria-label="Drop document or click to browse">
+          <div class="dropzone__icon">⇪</div>
+          <div class="dropzone__text" id="upload-dropzone-text">Drop document or click to browse</div>
+          <div class="dropzone__hint">PDF or TXT · one certificate at a time</div>
+        </div>
+        <input type="file" id="upload-file" accept=".pdf,.txt" hidden />
+      </form>
+      <p class="error" id="upload-error"></p>
+      <p class="dropzone__status" id="upload-status"></p>
+      <input type="text" id="doc-search" class="doc-search-input" placeholder="Search documents by filename…" />
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Document</th>
+            <th>Uploaded</th>
+            <th class="data-table__status">Status</th>
+          </tr>
+        </thead>
+        <tbody id="doc-list"></tbody>
+      </table>
     </section>
 
-    <section class="panel" id="review-panel" style="display: none">
-      <h2>Review</h2>
-      <div id="review-content"></div>
+    <section class="panel">
+      <h2>Workflow summary</h2>
+      <p class="muted">Current state of every heat across all uploaded documents.</p>
+      <dl class="summary-list">
+        <div class="summary-row">
+          <dt>Needs review</dt>
+          <dd id="summary-needs-review">0</dd>
+        </div>
+        <div class="summary-row summary-row--rejected">
+          <dt>Open blocking issues</dt>
+          <dd id="summary-blocking">0</dd>
+        </div>
+        <div class="summary-row">
+          <dt>Reviewed, awaiting issuance</dt>
+          <dd id="summary-awaiting">0</dd>
+        </div>
+        <div class="summary-row summary-row--verified">
+          <dt>Credentials issued</dt>
+          <dd id="summary-issued">0</dd>
+        </div>
+      </dl>
+      <div class="summary-actions">
+        <a class="btn btn--secondary" href="/passport.html">Passport lookup</a>
+        <a class="btn btn--secondary" href="/scan.html">Scan a part</a>
+      </div>
     </section>
   </div>
+
+  <section class="panel">
+    <h2>Credentials by material type</h2>
+    <div class="material-card-grid" id="material-card-grid"></div>
+  </section>
+
+  <section class="panel" id="review-panel" style="display: none">
+    <h2>Review</h2>
+    <div id="review-content"></div>
+  </section>
 </main>
 
 <script src="/app.js"></script>
@@ -58,6 +125,124 @@
     documents = await apiFetch("/documents");
     credentials = await apiFetch("/credentials");
     renderDocList();
+    renderDashboard();
+  }
+
+  // Workflow-stage tally across every heat on every uploaded document —
+  // GET /documents already returns heats inline (main.py's
+  // list_documents/_fetch_heats), so this is a pure client-side reduction,
+  // no extra requests. Deliberately workflow counts (has a human reviewed
+  // it? is it issued? is something blocking it?), not compiled pass/fail/
+  // insufficient_data verdicts — that would mean compiling a passport per
+  // credential just for a summary tile, and this app already has a
+  // dedicated place for that compile (passport.html).
+  function computeWorkflowCounts() {
+    let totalHeats = 0, needsReview = 0, blocking = 0, awaitingIssuance = 0, issued = 0;
+    for (const doc of documents) {
+      for (const heat of doc.heats) {
+        totalHeats++;
+        const hasOpenBlocking = (heat.flags || []).some((f) => f.severity === "blocking" && f.status !== "resolved");
+        if (hasOpenBlocking) blocking++;
+        if (!heat.reviewed) needsReview++;
+        else if (!heat.credential_id) awaitingIssuance++;
+        if (heat.credential_id) issued++;
+      }
+    }
+    return { totalHeats, needsReview, blocking, awaitingIssuance, issued };
+  }
+
+  // The app's single status-chip mapping, applied everywhere a heat/
+  // document's status is shown (document table, heat card header). No
+  // backend field already outputs this 4-state vocabulary directly — it's
+  // derived from real fields (open flag severity, reviewed, credential_id).
+  // Priority order lets a document (which has many heats) roll up to its
+  // worst heat's status the same way passport.py rolls up a verdict from
+  // many nodes.
+  const STATUS_PRIORITY = { rejected: 3, flagged: 2, pending: 1, verified: 0 };
+  const STATUS_LABEL = { rejected: "REJECTED", flagged: "FLAGGED", pending: "PENDING", verified: "VERIFIED" };
+
+  function heatStatusKey(heat) {
+    const openFlags = (heat.flags || []).filter((f) => f.status !== "resolved");
+    if (openFlags.some((f) => f.severity === "blocking")) return "rejected";
+    if (openFlags.length) return "flagged";
+    if (heat.reviewed && heat.credential_id) return "verified";
+    return "pending";
+  }
+
+  function documentStatusKey(doc) {
+    if (!doc.heats.length) return "pending";
+    return doc.heats
+      .map(heatStatusKey)
+      .reduce((worst, k) => (STATUS_PRIORITY[k] > STATUS_PRIORITY[worst] ? k : worst), "verified");
+  }
+
+  function statusChip(key, label) {
+    return el("span", { class: `status-chip status-chip--${key}`, text: label || STATUS_LABEL[key] });
+  }
+
+  function formatTimestamp(iso) {
+    const date = new Date(iso);
+    return Number.isNaN(date.getTime()) ? String(iso) : date.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  }
+
+  // Groups active (non-revoked) credentials by subject.material_type —
+  // this app's equivalent of a control-family breakdown, translated to
+  // what the data model actually tracks (DFARS rare-earth material scope,
+  // not NIST control families).
+  function computeMaterialBreakdown() {
+    const byMaterial = new Map();
+    for (const c of credentials) {
+      if (c.revoked_at) continue;
+      const material = (c.subject && c.subject.material_type) || "Unclassified";
+      byMaterial.set(material, (byMaterial.get(material) || 0) + 1);
+    }
+    return byMaterial;
+  }
+
+  function renderMaterialCard(material, count, maxCount) {
+    const pct = Math.max(6, Math.round((count / maxCount) * 100));
+    return el("div", { class: "material-card" }, [
+      el("div", { class: "material-card__label", text: material }),
+      el("div", { class: "material-card__bar-track" }, [el("div", { class: "material-card__bar-fill", style: `width:${pct}%` })]),
+      el("div", { class: "material-card__count", text: `${count} credential${count === 1 ? "" : "s"}` }),
+    ]);
+  }
+
+  function renderDashboard() {
+    // Absent in the minimal fixtures tests/*.test.js build for
+    // loadPageFunctions() (they only stub #upload-form/#doc-list/
+    // #review-panel — see review-submission.test.js's own comment on
+    // why) — a real page load always has these, so this only ever
+    // short-circuits under test.
+    if (!document.getElementById("stat-docs")) return;
+
+    const counts = computeWorkflowCounts();
+    const activeCredentials = credentials.filter((c) => !c.revoked_at).length;
+
+    document.getElementById("stat-docs").textContent = documents.length;
+    document.getElementById("stat-heats").textContent = counts.totalHeats;
+    document.getElementById("stat-needs-review").textContent = counts.needsReview;
+    document.getElementById("stat-blocking").textContent = counts.blocking;
+    document.getElementById("stat-issued").textContent = activeCredentials;
+
+    document.getElementById("summary-needs-review").textContent = counts.needsReview;
+    document.getElementById("summary-blocking").textContent = counts.blocking;
+    document.getElementById("summary-awaiting").textContent = counts.awaitingIssuance;
+    document.getElementById("summary-issued").textContent = counts.issued;
+
+    const cardGrid = document.getElementById("material-card-grid");
+    cardGrid.innerHTML = "";
+    const byMaterial = computeMaterialBreakdown();
+    if (byMaterial.size === 0) {
+      cardGrid.appendChild(
+        el("p", { class: "muted", text: "No credentials issued yet — material breakdown appears here once heats are issued." })
+      );
+    } else {
+      const maxCount = Math.max(...byMaterial.values());
+      for (const [material, count] of [...byMaterial.entries()].sort((a, b) => b[1] - a[1])) {
+        cardGrid.appendChild(renderMaterialCard(material, count, maxCount));
+      }
+    }
   }
 
   // Synthetic documents created without a real uploaded file (e.g. demo
@@ -77,43 +262,152 @@
     return doc.filename;
   }
 
+  // Search text and "show all" state for the document list below — pure
+  // client-side, no backend query params. GET /documents already returns
+  // every document in one response (main.py's list_documents), so at real
+  // supplier volume the actual fix is a paginated/searchable endpoint; this
+  // is the UI-side mitigation that doesn't require that backend work: a
+  // text filter, and rendering only a first page of matches by default so
+  // the DOM (and a reviewer's scroll) doesn't have to deal with hundreds
+  // of rows at once.
+  let docFilterText = "";
+  let docListExpanded = false;
+  const DOC_LIST_PAGE_SIZE = 8;
+
   function renderDocList() {
     const list = document.getElementById("doc-list");
     list.innerHTML = "";
     if (documents.length === 0) {
-      list.appendChild(el("li", { text: "No documents uploaded yet." }));
+      list.appendChild(el("tr", {}, [el("td", { colspan: "3", class: "muted", text: "No documents uploaded yet." })]));
+      return;
     }
-    for (const doc of documents) {
-      const li = el(
-        "li",
-        { onclick: () => selectDocument(doc.id), class: doc.id === selectedDocumentId ? "selected" : "" },
+    const filtered = docFilterText
+      ? documents.filter((doc) => displayFilename(doc).toLowerCase().includes(docFilterText))
+      : documents;
+    if (filtered.length === 0) {
+      list.appendChild(el("tr", {}, [el("td", { colspan: "3", class: "muted", text: "No documents match your search." })]));
+      return;
+    }
+    // A search is itself a way of narrowing a big list down to a handful
+    // of rows — showing every match (not just a first page of them) is
+    // the point once someone's actually searching.
+    const showAll = docListExpanded || !!docFilterText;
+    const visible = showAll ? filtered : filtered.slice(0, DOC_LIST_PAGE_SIZE);
+    for (const doc of visible) {
+      const row = el(
+        "tr",
+        {
+          onclick: () => selectDocument(doc.id),
+          class: `is-clickable${doc.id === selectedDocumentId ? " is-selected" : ""}`,
+        },
         [
-          el("span", { text: displayFilename(doc) }),
-          el("span", { class: `ar-pill ar-pill-workflow${doc.status === "reviewed" ? " reviewed" : ""}`, text: doc.status }),
+          el("td", { class: "mono", text: displayFilename(doc) }),
+          el("td", { class: "mono muted", text: formatTimestamp(doc.uploaded_at) }),
+          el("td", { class: "data-table__status" }, [statusChip(documentStatusKey(doc))]),
         ]
       );
-      list.appendChild(li);
+      list.appendChild(row);
+    }
+    if (!showAll && filtered.length > DOC_LIST_PAGE_SIZE) {
+      list.appendChild(
+        el("tr", {}, [
+          el("td", { colspan: "3" }, [
+            el("a", {
+              class: "btn btn--tertiary",
+              href: "#",
+              text: `Show all ${filtered.length} documents`,
+              onclick: (e) => {
+                e.preventDefault();
+                docListExpanded = true;
+                renderDocList();
+              },
+            }),
+          ]),
+        ])
+      );
     }
   }
 
-  document.getElementById("upload-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const fileInput = document.getElementById("upload-file");
-    const errorEl = document.getElementById("upload-error");
-    errorEl.textContent = "";
-    if (!fileInput.files.length) return;
-    const form = new FormData();
-    form.append("file", fileInput.files[0]);
-    form.append("document_type", "mtr_coc");
-    try {
-      const doc = await apiFetch("/documents/upload", { method: "POST", body: form });
-      fileInput.value = "";
-      await refreshAll();
-      selectDocument(doc.id);
-    } catch (err) {
-      errorEl.textContent = err.message;
+  // Guarded the same way as the dropzone wiring below: the minimal DOM
+  // fixtures tests/*.test.js build don't include this input.
+  const docSearchInput = document.getElementById("doc-search");
+  if (docSearchInput) {
+    docSearchInput.addEventListener("input", (e) => {
+      docFilterText = e.target.value.trim().toLowerCase();
+      docListExpanded = false;
+      renderDocList();
+    });
+  }
+
+  // Real drag-and-drop upload, replacing the old plain file-picker
+  // button: click-to-browse still works via the hidden #upload-file
+  // input, and dropping a file onto the zone uploads it directly — no
+  // separate "submit" step. Both paths funnel through the same
+  // uploadFile() so there's exactly one upload code path either way.
+  // IIFE (not top-level `if`) so the early return below is legal, and so
+  // uploadFile/setDropzoneBusy stay scoped here rather than leaking as
+  // page-global names. Guarded on #upload-dropzone existing at all: the
+  // minimal DOM fixtures tests/*.test.js build for loadPageFunctions()
+  // only stub #upload-form/#doc-list/#review-panel (see
+  // review-submission.test.js's own comment on why), not this markup —
+  // a real page load always has it, so this only ever short-circuits
+  // under test.
+  (function wireUploadDropzone() {
+    const dropzone = document.getElementById("upload-dropzone");
+    if (!dropzone) return;
+    const dropzoneText = document.getElementById("upload-dropzone-text");
+    const uploadFileInput = document.getElementById("upload-file");
+    const uploadErrorEl = document.getElementById("upload-error");
+    const uploadStatusEl = document.getElementById("upload-status");
+
+    function setDropzoneBusy(busy) {
+      dropzone.classList.toggle("is-busy", busy);
+      dropzoneText.textContent = busy ? "Uploading & extracting…" : "Drop document or click to browse";
     }
-  });
+
+    async function uploadFile(file) {
+      if (!file) return;
+      uploadErrorEl.textContent = "";
+      uploadStatusEl.textContent = "";
+      setDropzoneBusy(true);
+      const form = new FormData();
+      form.append("file", file);
+      form.append("document_type", "mtr_coc");
+      try {
+        const doc = await apiFetch("/documents/upload", { method: "POST", body: form });
+        uploadFileInput.value = "";
+        await refreshAll();
+        selectDocument(doc.id);
+        uploadStatusEl.textContent = `${file.name} — ${doc.heats.length} heat(s) extracted.`;
+      } catch (err) {
+        uploadErrorEl.textContent = err.message;
+      } finally {
+        setDropzoneBusy(false);
+      }
+    }
+
+    dropzone.addEventListener("click", () => uploadFileInput.click());
+    dropzone.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        uploadFileInput.click();
+      }
+    });
+    uploadFileInput.addEventListener("change", () => uploadFile(uploadFileInput.files[0]));
+    ["dragenter", "dragover"].forEach((evt) =>
+      dropzone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        dropzone.classList.add("is-dragover");
+      })
+    );
+    ["dragleave", "drop"].forEach((evt) =>
+      dropzone.addEventListener(evt, (e) => {
+        e.preventDefault();
+        dropzone.classList.remove("is-dragover");
+      })
+    );
+    dropzone.addEventListener("drop", (e) => uploadFile(e.dataTransfer.files[0]));
+  })();
 
   async function selectDocument(id) {
     selectedDocumentId = id;
@@ -129,7 +423,7 @@
     content.innerHTML = "";
 
     content.appendChild(
-      el("div", { class: "side-by-side" }, [
+      el("div", { class: "doc-meta-grid" }, [
         el("div", {}, [el("label", { text: "Raw text" }), el("pre", { text: doc.raw_text })]),
         el("div", {}, [
           el("label", { text: "Certificate" }),
@@ -147,14 +441,15 @@
     }
   }
 
-  // Three states per the spec — found / not found / flagged. "Flagged"
-  // is distinct from "not found": a value is present but needs scrutiny
-  // (e.g. a sub-lot origin that's unconfirmed or covered-country), so it
-  // must never collapse into looking like a clean miss.
-  function tag(state, label) {
-    const cls = state === "blocking" ? "ar-pill-blocking" : state === "flagged" ? "ar-pill-needs-review" : state === "found" ? "ar-pill-found" : "ar-pill-missing";
-    const defaultLabel = state === "blocking" ? "blocking" : state === "flagged" ? "flagged" : state === "found" ? "found" : "not found";
-    return el("span", { class: `ar-pill ${cls}`, text: label || defaultLabel });
+  // Field-presence marker for the quiet "Found" zone — deliberately not a
+  // status chip (see layout.css's .field-tag comment): "found" renders
+  // nothing at all (absence of a marker is itself the "fine" signal),
+  // "missing" renders a faint, non-alarming label. A missing field isn't
+  // necessarily a problem on its own — if it genuinely needs attention, a
+  // real review flag (rendered separately, above, via a status chip)
+  // already says so.
+  function fieldTag(found, label) {
+    return found ? null : el("span", { class: "field-tag", text: label || "not found" });
   }
 
   // Structured review flags — {issue_type, field_name, severity, human_readable_reason,
@@ -181,11 +476,11 @@
     });
     const items = sorted.map((f) => {
       const resolved = f.status === "resolved";
-      const severityPillClass = resolved ? "ar-pill-resolved" : f.severity === "blocking" ? "ar-pill-blocking" : "ar-pill-needs-review";
+      const statusKey = resolved ? "verified" : f.severity === "blocking" ? "rejected" : "flagged";
       const sourceLabel = `detected by: ${FLAG_SOURCE_LABELS[f.source] || f.source}`;
       const detailText = `${f.issue_type}${f.field_name ? " · " + f.field_name : ""}`;
       return el("li", { class: `rq-flag-row${resolved ? " resolved" : ""}` }, [
-        el("span", { class: `ar-pill ${severityPillClass}`, text: resolved ? "resolved" : f.severity.replace("_", " ") }),
+        statusChip(statusKey),
         el("span", { class: "rq-flag-reason", text: f.human_readable_reason }),
         el("span", { class: "rq-flag-meta", text: sourceLabel }),
         el("span", {
@@ -329,7 +624,7 @@
             ? buildKeyValueEditor(currentValue, false)
             : buildTestResultsEditor(currentValue, false);
         const saveBtn = el("button", {
-          class: "rq-save-btn",
+          class: "btn btn--secondary btn--sm",
           type: "button",
           text: "Save correction",
           onclick: async () => {
@@ -365,7 +660,7 @@
 
       const input = el("input", { type: "text", value: currentValue ?? "" });
       const saveBtn = el("button", {
-        class: "rq-save-btn",
+        class: "btn btn--secondary btn--sm",
         type: "button",
         text: "Save correction",
         onclick: async () => {
@@ -413,14 +708,14 @@
     container.appendChild(el("h4", { class: "rq-zone-title", text: "Correction history" }));
     const rows = trail.map((entry) =>
       el("tr", {}, [
-        el("td", { class: "ar-mono", text: entry.created_at }),
+        el("td", { class: "mono", text: entry.created_at }),
         el("td", { text: entry.action }),
-        el("td", { class: "ar-mono", text: entry.actor }),
+        el("td", { class: "mono", text: entry.actor }),
         el("td", { text: formatAuditDetail(entry.detail) }),
       ])
     );
     container.appendChild(
-      el("table", { class: "ar-data-table" }, [
+      el("table", { class: "data-table" }, [
         el("thead", {}, [
           el("tr", {}, [el("th", { text: "When" }), el("th", { text: "Action" }), el("th", { text: "Actor" }), el("th", { text: "Detail" })]),
         ]),
@@ -441,7 +736,7 @@
       const children = [keyInput, valueInput];
       if (!locked) {
         children.push(
-          el("button", { class: "icon-btn", type: "button", text: "×", onclick: () => { row.remove(); rows.splice(rows.indexOf(row), 1); } })
+          el("button", { class: "btn btn--icon", type: "button", text: "×", onclick: () => { row.remove(); rows.splice(rows.indexOf(row), 1); } })
         );
       }
       const row = el("div", { class: "kv-row" }, children);
@@ -452,7 +747,7 @@
 
     for (const [key, value] of Object.entries(initialDict || {})) addRow(key, value);
     if (!locked) {
-      addBtn = el("button", { class: "icon-btn", type: "button", text: "+ element" });
+      addBtn = el("button", { class: "btn btn--secondary btn--sm", type: "button", text: "+ element" });
       addBtn.addEventListener("click", () => addRow("", ""));
       container.appendChild(addBtn);
     }
@@ -518,7 +813,7 @@
       const children = [nameInput, valueInput, resultSelect];
       if (!locked) {
         children.push(
-          el("button", { class: "icon-btn", type: "button", text: "×", onclick: () => { row.remove(); rows.splice(rows.findIndex((r) => r.row === row), 1); } })
+          el("button", { class: "btn btn--icon", type: "button", text: "×", onclick: () => { row.remove(); rows.splice(rows.findIndex((r) => r.row === row), 1); } })
         );
       }
       const row = el("div", { class: "kv-row" }, children);
@@ -529,7 +824,7 @@
 
     for (const [name, entry] of Object.entries(initialDict || {})) addRow(name, entry);
     if (!locked) {
-      addBtn = el("button", { class: "icon-btn", type: "button", text: "+ test" });
+      addBtn = el("button", { class: "btn btn--secondary btn--sm", type: "button", text: "+ test" });
       addBtn.addEventListener("click", () => addRow("", { value: "", result: "" }));
       container.appendChild(addBtn);
     }
@@ -573,9 +868,12 @@
       const notesInput = el("input", { type: "text", value: sublot.notes || "", disabled: locked ? "disabled" : null });
       const sublotFlags = (sublot.flags || []).filter((f) => f.status !== "resolved");
       const worstSeverity = sublotFlags.some((f) => f.severity === "blocking") ? "blocking" : sublotFlags.length ? "needs_review" : null;
-      const statusLabel = sublotFlags.length > 1 ? `flagged (${sublotFlags.length})` : "flagged";
-      const statusTag = worstSeverity === "blocking" ? tag("blocking", statusLabel) : worstSeverity ? tag("flagged", statusLabel) : tag("found", "ok");
-      if (sublotFlags.length) statusTag.title = sublotFlags.map((f) => f.human_readable_reason).join("; ");
+      const statusKey = worstSeverity === "blocking" ? "rejected" : worstSeverity ? "flagged" : "verified";
+      const statusTag = statusChip(statusKey);
+      if (sublotFlags.length) {
+        const countPrefix = sublotFlags.length > 1 ? `${sublotFlags.length} open issues: ` : "";
+        statusTag.title = countPrefix + sublotFlags.map((f) => f.human_readable_reason).join("; ");
+      }
 
       const cells = [
         el("td", {}, [sublotIdInput]),
@@ -588,11 +886,11 @@
       if (!locked) {
         cells.push(
           el("td", {}, [
-            el("button", { class: "icon-btn", type: "button", text: "×", onclick: () => { row.remove(); rows.splice(rows.indexOf(row), 1); } }),
+            el("button", { class: "btn btn--icon", type: "button", text: "×", onclick: () => { row.remove(); rows.splice(rows.indexOf(row), 1); } }),
           ])
         );
       }
-      const rowClass = worstSeverity === "blocking" ? "blocking-row" : worstSeverity ? "needs-review-row" : "";
+      const rowClass = worstSeverity === "blocking" ? "row--rejected" : worstSeverity ? "row--flagged" : "";
       const row = el("tr", { class: rowClass }, cells);
       // Carries the existing heat_sublots row id (if any) through to
       // getValue() below, so a /review submission can round-trip it and
@@ -616,10 +914,10 @@
     ];
     if (!locked) headerCells.push(el("th", { text: "" }));
 
-    const table = el("table", { class: "ar-data-table editable" }, [el("thead", {}, [el("tr", {}, headerCells)]), tbody]);
+    const table = el("table", { class: "data-table" }, [el("thead", {}, [el("tr", {}, headerCells)]), tbody]);
     const container = el("div", {}, [table]);
     if (!locked) {
-      container.appendChild(el("button", { class: "icon-btn", type: "button", text: "+ sub-lot", onclick: () => addRow({}) }));
+      container.appendChild(el("button", { class: "btn btn--secondary btn--sm", type: "button", text: "+ sub-lot", onclick: () => addRow({}) }));
     }
 
     return {
@@ -651,18 +949,12 @@
     // already been resolved shouldn't keep the header/zone/issuance gate
     // reading as "blocking" forever -- only an *open* one should.
     const hasBlockingFlag = (heat.flags || []).some((f) => f.severity === "blocking" && f.status !== "resolved");
-    const headerStatusTag = hasBlockingFlag
-      ? tag("blocking", "blocking issue")
-      : heat.flagged_for_review
-      ? tag("flagged", "flagged for review")
-      : tag("found", "clean");
-    const headerTags = [headerStatusTag];
-    // Reviewed badge: true only once someone has both submitted the
-    // review form AND every flagged field is addressed — submitting the
-    // form alone used to be enough, which let a heat with a still-open
-    // blocking flag read as "reviewed" in the UI.
-    const badgeReviewed = heat.reviewed && heat.fully_addressed;
-    headerTags.push(el("span", { class: `ar-pill ar-pill-workflow${badgeReviewed ? " reviewed" : ""}`, text: badgeReviewed ? "reviewed" : "needs review" }));
+    // One chip, not two: the old build showed a compliance-cleanliness pill
+    // (blocking/flagged/clean) next to a separate workflow pill (reviewed/
+    // needs review) whose relationship to each other wasn't obvious.
+    // heatStatusKey() already accounts for both axes (open flags AND
+    // reviewed/issued state) in one 4-state value.
+    const headerTags = [statusChip(heatStatusKey(heat))];
 
     card.appendChild(
       el("div", { class: "rq-card-header" }, [
@@ -700,11 +992,11 @@
 
     foundZone.append(
       el("div", { class: "rq-field-row" }, [
-        el("div", { class: "rq-field-row-head" }, [el("span", { class: "rq-field-label", text: "Heat / melt id" }), heat.heat_id ? tag("found") : tag("missing")]),
+        el("div", { class: "rq-field-row-head" }, [el("span", { class: "rq-field-label", text: "Heat / melt id" }), fieldTag(!!heat.heat_id)]),
         heatIdInput,
       ]),
       el("div", { class: "rq-field-row" }, [
-        el("div", { class: "rq-field-row-head" }, [el("span", { class: "rq-field-label", text: "Mass (kg)" }), heat.mass_kg != null ? tag("found") : tag("missing")]),
+        el("div", { class: "rq-field-row-head" }, [el("span", { class: "rq-field-label", text: "Mass (kg)" }), fieldTag(heat.mass_kg != null)]),
         massInput,
       ])
     );
@@ -712,7 +1004,7 @@
     foundZone.appendChild(el("label", { text: "Alloy composition (wt%)" }));
     const compositionEditor = buildKeyValueEditor(heat.alloy_composition, locked);
     foundZone.appendChild(compositionEditor.container);
-    if (!heat.alloy_composition) foundZone.appendChild(tag("missing", "no composition found"));
+    if (!heat.alloy_composition) foundZone.appendChild(fieldTag(false, "no composition found"));
 
     const segAttested = el("input", { type: "checkbox", disabled: locked ? "disabled" : null });
     segAttested.checked = heat.segregation_attested;
@@ -739,7 +1031,7 @@
     if (!locked) {
       card.appendChild(
         el("button", {
-          class: "rq-submit-btn",
+          class: "btn btn--primary",
           text: "Submit review",
           onclick: async () => {
             statusEl.textContent = "";
@@ -895,7 +1187,7 @@
       el(
         "label",
         {
-          style: `display:flex;align-items:center;gap:0.4rem;font-weight:normal;font-family:'IBM Plex Sans',sans-serif;font-size:0.85rem;${c.revoked_at ? "color:var(--slate)" : "color:var(--ink)"}`,
+          style: `display:flex;align-items:center;gap:0.4rem;font-weight:normal;font-family:var(--font-ui);font-size:0.85rem;${c.revoked_at ? "color:var(--color-text-muted)" : "color:var(--color-text)"}`,
         },
         [
           el("input", { type: "checkbox", value: c.id, class: "source-checkbox", disabled: c.revoked_at ? "disabled" : null }),
@@ -992,7 +1284,7 @@
         dl
       );
       const confirmBtn = el("button", {
-        class: "rq-submit-btn",
+        class: "btn btn--primary",
         text: "Confirm & sign",
         onclick: async () => {
           resultEl.innerHTML = "";
@@ -1019,7 +1311,7 @@
         },
       });
       const cancelBtn = el("button", {
-        class: "icon-btn",
+        class: "btn btn--tertiary",
         type: "button",
         text: "Cancel",
         onclick: () => {
@@ -1031,7 +1323,7 @@
     }
 
     const submitBtn = el("button", {
-      class: "rq-submit-btn",
+      class: "btn btn--primary",
       text: "Issue credential",
       onclick: async () => {
         resultEl.innerHTML = "";

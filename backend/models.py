@@ -249,3 +249,34 @@ class CreateUserRequest(BaseModel):
     password: str
     role: Literal["org_user", "buyer_auditor", "platform_admin"]
     org_id: Optional[str] = None
+
+
+# Invite-based org onboarding (see db.py's org_invites table comment for
+# the full rationale). Exactly one of org_id/new_org_name must be set --
+# enforced in main.py's endpoint body, same style as CreateUserRequest's
+# own org_id/role check, not a pydantic validator.
+class CreateOrgInviteRequest(BaseModel):
+    email: str
+    org_id: Optional[str] = None
+    new_org_name: Optional[str] = None
+
+
+class OrgInviteResponse(BaseModel):
+    id: str
+    org_id: str
+    org_name: str
+    email: str
+    expires_at: str
+    invite_url: str
+
+
+# What the public, pre-auth accept-invite page gets — deliberately narrow
+# (just enough to render "you're joining <org>"), not the full invite row.
+class InvitePreview(BaseModel):
+    org_name: str
+    email: str
+    expires_at: str
+
+
+class AcceptInviteRequest(BaseModel):
+    password: str

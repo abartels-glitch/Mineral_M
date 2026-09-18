@@ -1,0 +1,135 @@
+/* ---- Design tokens — the single source of truth for every color, type,
+   space, and shape value in the app. Every page loads this before
+   components.css/layout.css. Nothing in this file is page-specific: if a
+   rule only applies to one page, it does not belong here.
+
+   Permanently dark, not OS-preference-dependent — this is an ops-console
+   register (closer to a SCADA/compliance panel than a document that
+   adapts to ambient light/dark preference), a deliberate product call
+   carried over from the prior design pass. ---- */
+:root {
+  color-scheme: dark;
+
+  /* Color — base */
+  --color-bg: #0b0c0e;
+  --color-surface: #131417;
+  --color-surface-raised: #191b1f;
+  --color-border: #262931;
+  --color-border-strong: #35383f;
+
+  /* Color — text */
+  --color-text: #e7e8ea;
+  --color-text-muted: #9a9da5;
+  --color-text-faint: #5c5f66;
+
+  /* Color — accent (deep signal-teal, not blue/purple/orange) */
+  --color-accent: #2f6f5e;
+  --color-accent-strong: #3f8c76;
+
+  /* Color — status, semantic, used identically everywhere via .status-chip.
+     Four states only — never add a fifth. */
+  --status-verified-fg: #4fae87;
+  --status-verified-bg: rgba(79, 174, 135, 0.12);
+  --status-pending-fg: #c9a227;
+  --status-pending-bg: rgba(201, 162, 39, 0.12);
+  --status-flagged-fg: #d08a3e;
+  --status-flagged-bg: rgba(208, 138, 62, 0.12);
+  /* Lightened slightly from the spec's literal #c1503f (rgb(193,80,63)):
+     that exact value only clears 3.94:1 against --color-surface, below
+     the 4.5:1 WCAG AA floor for normal-size text — the only one of the
+     four status colors that failed. This is the minimal shift that
+     clears AA (4.65:1) while staying the same red. See
+     design-system-regression.test.js for the check that keeps this true. */
+  --status-rejected-fg: #c76252;
+  --status-rejected-bg: rgba(199, 98, 82, 0.12);
+
+  /* Type */
+  --font-ui: "Inter", "IBM Plex Sans", -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", "JetBrains Mono", ui-monospace, monospace;
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.5rem;
+  --text-2xl: 2rem;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  /* Space (4px base) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  /* Shape */
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-none: 0;
+
+  /* Motion — reserved for one deliberate moment (status transitions), not
+     decoration. */
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-status-change: 240ms;
+
+  /* Header — fixed regardless of how much nav/user content a given page
+     has to show, so header height never varies page to page (see
+     components.css's header rule for the wrapping fix this backs). */
+  --header-height: 56px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-status-change: 0ms;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  font-weight: var(--weight-regular);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4,
+p,
+dl,
+dd {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+}
+
+/* Every interactive element gets a visible 2px focus ring, offset from the
+   element's own border — this is a compliance tool; keyboard/assistive-tech
+   use is assumed, not an edge case. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}

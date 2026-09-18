@@ -59,6 +59,21 @@ async function getCurrentUserOrNull() {
 // document.querySelector("header nav") and appends into it, that <nav>
 // already exists with this function's links inside it. Neither
 // function touches what the other wrote.
+// The badge+name+subtitle block every page's <header> opens with.
+// login.html can't call this directly (its header isn't built by
+// renderHeader() -- see that function's own comment on why), so it
+// keeps a hand-written copy of this exact markup instead; the two are
+// meant to stay visually identical, not structurally shared.
+function renderBrand() {
+  return el("div", { class: "app-header__brand" }, [
+    el("span", { class: "app-header__badge", text: "⛨" }),
+    el("div", { class: "app-header__brand-text" }, [
+      el("h1", { class: "app-header__name", text: "FEOC Compliance Passport" }),
+      el("span", { class: "app-header__sub", text: "DFARS Rare-Earth Rule · Non-FEOC Provenance" }),
+    ]),
+  ]);
+}
+
 function renderHeader() {
   const root = document.getElementById("header-root");
   if (!root) return;
@@ -72,13 +87,17 @@ function renderHeader() {
     { href: "/scan.html", text: "Scan" },
     { href: "/keys.html", text: "Signing key" },
   ];
-  root.appendChild(el("h1", { text: "FEOC Compliance Passport (MVP)" }));
+  root.appendChild(renderBrand());
   root.appendChild(
     el(
       "nav",
-      {},
+      { class: "app-header__nav" },
       links.map((link) =>
-        el("a", { href: link.href, text: link.text, class: link.href === currentPath ? "active" : null })
+        el("a", {
+          href: link.href,
+          text: link.text,
+          class: `app-header__nav-link${link.href === currentPath ? " is-active" : ""}`,
+        })
       )
     )
   );
@@ -87,21 +106,46 @@ function renderHeader() {
 renderHeader();
 
 function renderUserHeader(user) {
-  const nav = document.querySelector("header nav");
-  if (!nav) return;
-  const info = el("span", {
-    class: "muted",
-    style: "margin-left: 1rem",
-    text: `${user.email}${user.org_name ? " · " + user.org_name : ""} (${user.role})`,
-  });
-  const logout = el("a", { href: "#", style: "margin-left: 1rem", text: "Log out" });
+  // Fixed-height header (see components.css's .app-header comment): the
+  // user/org/role + Log out block is its own flex region alongside nav,
+  // not appended into <nav> itself, so it never contributes to nav wrap.
+  const header = document.querySelector(".app-header");
+  if (!header) return;
+
+  // Admin is appended here, not in renderHeader()'s own links array,
+  // since renderHeader() runs synchronously at script load -- before
+  // requireAuth()/getCurrentUserOrNull() has resolved a user to check
+  // the role of. Same nav element, same link markup, just added once the
+  // role is actually known.
+  if (user.role === "platform_admin") {
+    const nav = header.querySelector(".app-header__nav");
+    if (nav) {
+      const currentPath = location.pathname === "/" ? "/index.html" : location.pathname;
+      nav.appendChild(
+        el("a", {
+          href: "/admin.html",
+          text: "Admin",
+          class: `app-header__nav-link${currentPath === "/admin.html" ? " is-active" : ""}`,
+        })
+      );
+    }
+  }
+
+  const logout = el("a", { href: "#", class: "app-header__logout", text: "Log out" });
   logout.addEventListener("click", async (e) => {
     e.preventDefault();
     await apiFetch("/auth/logout", { method: "POST" });
     location.href = "/login.html";
   });
-  nav.appendChild(info);
-  nav.appendChild(logout);
+  header.appendChild(
+    el("div", { class: "app-header__user" }, [
+      el("span", {
+        class: "app-header__user-info",
+        text: `${user.email}${user.org_name ? " · " + user.org_name : ""} (${user.role})`,
+      }),
+      logout,
+    ])
+  );
 }
 
 // Light formatting for an audit_log entry's detail object, used by both

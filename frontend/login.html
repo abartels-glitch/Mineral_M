@@ -1,28 +1,74 @@
 <title>Log in — FEOC Compliance Passport</title>
-<link rel="stylesheet" href="/style.css" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="stylesheet" href="/tokens.css" />
+<link rel="stylesheet" href="/components.css" />
+<link rel="stylesheet" href="/layout.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap"
+  rel="stylesheet"
+/>
 
-<header>
-  <h1>FEOC Compliance Passport (MVP)</h1>
-</header>
+<!-- Deliberately a static header, not <header id="header-root">: this is the
+     one page a logged-out visitor always lands on, and app.js's renderHeader()
+     would otherwise populate a nav pointing at pages this session can't use
+     yet. Hand-copies renderBrand()'s markup (app.js) to stay visually
+     identical to every other page's header. -->
+<body>
+  <header class="app-header">
+    <div class="app-header__brand">
+      <span class="app-header__badge">⛨</span>
+      <div class="app-header__brand-text">
+        <h1 class="app-header__name">FEOC Compliance Passport</h1>
+        <span class="app-header__sub">DFARS Rare-Earth Rule · Non-FEOC Provenance</span>
+      </div>
+    </div>
+  </header>
 
-<main class="narrow">
-  <section class="panel">
-    <h2>Log in</h2>
-    <p class="muted">
-      Accounts are created by a platform administrator and aren't
-      self-registered. Contact your organization's administrator for
-      access.
-    </p>
-    <form id="login-form">
-      <label for="email">Email</label>
-      <input type="text" id="email" autocomplete="username" />
-      <label for="password">Password</label>
-      <input type="password" id="password" autocomplete="current-password" />
-      <button type="submit">Log in</button>
-    </form>
-    <p class="error" id="login-error"></p>
-  </section>
-</main>
+  <main class="login-shell">
+    <!-- Decorative hero pane: restates real product facts from the README
+         (client-side Ed25519 keys, recursive graph compiler, audit trail),
+         nothing fabricated (no SSO/SOC2 claims this app doesn't back). -->
+    <section class="login-hero" aria-hidden="true">
+      <span class="login-hero-icon">⛨</span>
+      <h2 class="login-hero-title">
+        Chain-of-custody verification for DFARS-restricted materials
+      </h2>
+      <ul class="login-hero-points">
+        <li>
+          <span class="login-hero-check">✓</span>
+          Client-side Ed25519 signing — private keys never leave the org's browser
+        </li>
+        <li>
+          <span class="login-hero-check">✓</span>
+          Recursive credential graph compiler resolves full material provenance
+        </li>
+        <li>
+          <span class="login-hero-check">✓</span>
+          Immutable audit trail for every extraction, review, and issuance
+        </li>
+      </ul>
+    </section>
+
+    <section class="panel login-card">
+      <h2>Log in</h2>
+      <p class="muted">
+        Accounts are created by a platform administrator and aren't
+        self-registered. Contact your organization's administrator for
+        access.
+      </p>
+      <form id="login-form">
+        <label for="email">Email</label>
+        <input type="text" id="email" autocomplete="username" placeholder="you@yourcompany.com" />
+        <label for="password">Password</label>
+        <input type="password" id="password" autocomplete="current-password" placeholder="••••••••" />
+        <button type="submit" class="btn btn--primary btn--block">Log in</button>
+      </form>
+      <p class="error" id="login-error"></p>
+    </section>
+  </main>
 
 <script src="/app.js"></script>
 <script>

@@ -138,8 +138,30 @@ def _seed_org_a(client, conn):
     assert issued.status_code == 200, issued.text
     credential_id = issued.json()["id"]
 
+    # A real (unconsumed) invite for org_a, seeded directly -- same
+    # bypass-the-HTTP-endpoint spirit as make_issuer_key above, since the
+    # point here is a token to exercise GET/POST /invite/{token}*
+    # against, not proving POST /admin/invites itself (that's covered in
+    # test_org_invites.py).
+    invite_token = "sweep-test-invite-token"
+    conn.execute(
+        """
+        INSERT INTO org_invites (id, org_id, email, role, token_hash, invited_by, created_at, expires_at)
+        VALUES ('sweep-invite', ?, 'invitee@example.com', 'org_user', ?, 'admin@example.com',
+                '2026-01-01T00:00:00Z', '2099-01-01T00:00:00Z')
+        """,
+        (org_a, auth.hash_invite_token(invite_token)),
+    )
+    conn.commit()
+
     client.post("/auth/logout")
-    return {"document_id": document_id, "heat_id": heat_id, "credential_id": credential_id, "issuer_id": org_a}
+    return {
+        "document_id": document_id,
+        "heat_id": heat_id,
+        "credential_id": credential_id,
+        "issuer_id": org_a,
+        "invite_token": invite_token,
+    }
 
 
 def _login_org_b(client, conn):
@@ -210,6 +232,21 @@ SWEPT_ROUTES = {
         "call": lambda client, ids: client.post(
             f"/issuers/{ids['issuer_id']}/keys",
             json={"public_key": "irrelevant-blocked-before-validation", "password": "pw"},
+        ),
+    },
+    # Deliberately public/pre-auth: the whole point of an invite link is
+    # that the invitee has no session yet. What actually gates access
+    # here is possession of the unguessable token, not org membership —
+    # see test_org_invites.py for the single-use/expiry/wrong-org
+    # coverage that's the real security boundary for this feature.
+    ("GET", "/invite/{token}"): {
+        "expect": "public",
+        "call": lambda client, ids: client.get(f"/invite/{ids['invite_token']}"),
+    },
+    ("POST", "/invite/{token}/accept"): {
+        "expect": "public",
+        "call": lambda client, ids: client.post(
+            f"/invite/{ids['invite_token']}/accept", json={"password": "a-real-password"}
         ),
     },
 }

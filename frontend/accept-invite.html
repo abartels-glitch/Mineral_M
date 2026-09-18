@@ -1,0 +1,96 @@
+<title>Accept Invite — FEOC Compliance Passport</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="stylesheet" href="/tokens.css" />
+<link rel="stylesheet" href="/components.css" />
+<link rel="stylesheet" href="/layout.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap"
+  rel="stylesheet"
+/>
+
+<!-- Static header, same reasoning as login.html: this visitor has no
+     account yet, so the full logged-in nav (renderHeader()'s #header-root
+     behavior) would be premature/misleading here. -->
+<body>
+  <header class="app-header">
+    <div class="app-header__brand">
+      <span class="app-header__badge">⛨</span>
+      <div class="app-header__brand-text">
+        <h1 class="app-header__name">FEOC Compliance Passport</h1>
+        <span class="app-header__sub">DFARS Rare-Earth Rule · Non-FEOC Provenance</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="main--narrow">
+    <div class="state-block state-block--error" id="invalid-state" style="display: none">
+      <span class="state-block__icon">⚠</span>
+      <p class="state-block__title">This invite link isn't valid</p>
+      <p class="state-block__body" id="invalid-reason"></p>
+      <p class="state-block__action"><a href="/login.html" class="btn btn--secondary">Go to log in</a></p>
+    </div>
+
+    <section class="panel" id="accept-panel" style="display: none">
+      <h2>Set up your account</h2>
+      <p class="muted" id="invite-summary"></p>
+      <form id="accept-form">
+        <label for="password">Choose a password</label>
+        <input type="password" id="password" autocomplete="new-password" />
+        <button type="submit" class="btn btn--primary btn--block">Create account &amp; log in</button>
+      </form>
+      <p class="error" id="accept-error"></p>
+    </section>
+  </main>
+
+<script src="/app.js"></script>
+<script>
+  const token = new URLSearchParams(location.search).get("token");
+  const invalidState = document.getElementById("invalid-state");
+  const acceptPanel = document.getElementById("accept-panel");
+
+  function showInvalid(message) {
+    document.getElementById("invalid-reason").textContent = message;
+    invalidState.style.display = "flex";
+    acceptPanel.style.display = "none";
+  }
+
+  (async () => {
+    if (!token) {
+      showInvalid("No invite token was given in the link.");
+      return;
+    }
+    try {
+      const preview = await apiFetch(`/invite/${encodeURIComponent(token)}`);
+      document.getElementById("invite-summary").textContent =
+        `You're joining ${preview.org_name} as ${preview.email}.`;
+      acceptPanel.style.display = "block";
+      invalidState.style.display = "none";
+    } catch (err) {
+      showInvalid(err.message);
+    }
+  })();
+
+  document.getElementById("accept-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const errorEl = document.getElementById("accept-error");
+    errorEl.textContent = "";
+    const password = document.getElementById("password").value;
+    if (!password) {
+      errorEl.textContent = "Choose a password.";
+      return;
+    }
+    try {
+      await apiFetch(`/invite/${encodeURIComponent(token)}/accept`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      location.href = "/index.html";
+    } catch (err) {
+      errorEl.textContent = err.message;
+    }
+  });
+</script>

@@ -22,6 +22,7 @@ from db import get_db
 
 COOKIE_NAME = "session_token"
 SESSION_TTL_DAYS = 7
+INVITE_TTL_DAYS = 7
 
 
 def hash_password(password: str) -> str:
@@ -34,6 +35,18 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 def _hash_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+# Same hashing as session tokens (org_invites.token_hash is only ever a
+# hash, same as sessions.token_hash) -- a thin public alias rather than
+# exposing the private _hash_token to main.py directly, since org invites
+# aren't a session concept.
+def hash_invite_token(raw_token: str) -> str:
+    return _hash_token(raw_token)
+
+
+def generate_invite_token() -> str:
+    return secrets.token_urlsafe(32)
 
 
 def create_session(conn, user_id: str) -> str:

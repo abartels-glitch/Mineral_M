@@ -1,0 +1,152 @@
+<title>Admin — FEOC Compliance Passport</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="stylesheet" href="/tokens.css" />
+<link rel="stylesheet" href="/components.css" />
+<link rel="stylesheet" href="/layout.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap"
+  rel="stylesheet"
+/>
+
+<body>
+  <header id="header-root"></header>
+
+  <main class="main--narrow">
+    <h1 class="page-title">Admin</h1>
+
+    <section class="panel">
+      <h2>Invite an organization</h2>
+      <p class="muted">
+        Creates the invite link for a new supplier to set up their own account — copy it and send
+        it yourself (there's no email-sending set up in this app yet). The org still starts with
+        no active signing key: whoever accepts this invite will need a platform_admin to witness
+        their first key registration on the Signing key page, same as any other org.
+      </p>
+
+      <form id="invite-form">
+        <label>Organization</label>
+        <div style="display: flex; gap: var(--space-5); margin-bottom: var(--space-3)">
+          <label style="display: flex; align-items: center; gap: 0.4rem; font-weight: normal; margin-bottom: 0">
+            <input type="radio" name="org-mode" value="new" checked /> New organization
+          </label>
+          <label style="display: flex; align-items: center; gap: 0.4rem; font-weight: normal; margin-bottom: 0">
+            <input type="radio" name="org-mode" value="existing" /> Existing organization
+          </label>
+        </div>
+
+        <div id="new-org-field">
+          <label for="new-org-name">Organization name</label>
+          <input type="text" id="new-org-name" placeholder="e.g. Acme Tantalum Components" />
+        </div>
+        <div id="existing-org-field" style="display: none">
+          <label for="existing-org-select">Organization</label>
+          <select id="existing-org-select"></select>
+        </div>
+
+        <label for="invite-email">Invitee email</label>
+        <input type="text" id="invite-email" placeholder="e.g. maria@newsupplier.example" class="mono" />
+
+        <button type="submit" class="btn btn--primary">Create invite</button>
+      </form>
+      <p class="error" id="invite-error"></p>
+    </section>
+
+    <section class="panel" id="invite-result-panel" style="display: none">
+      <h2>Invite created</h2>
+      <p class="muted" id="invite-result-summary"></p>
+      <label for="invite-link">Invite link — copy and send this to the invitee</label>
+      <input type="text" id="invite-link" class="mono" readonly onclick="this.select()" />
+      <button type="button" id="copy-link-btn" class="btn btn--secondary btn--sm">Copy link</button>
+      <p class="success" id="copy-status"></p>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+  <script>
+    let currentUser = null;
+
+    const newRadio = document.querySelector('input[name="org-mode"][value="new"]');
+    const existingRadio = document.querySelector('input[name="org-mode"][value="existing"]');
+    const newOrgField = document.getElementById("new-org-field");
+    const existingOrgField = document.getElementById("existing-org-field");
+
+    function syncOrgModeFields() {
+      const isNew = newRadio.checked;
+      newOrgField.style.display = isNew ? "block" : "none";
+      existingOrgField.style.display = isNew ? "none" : "block";
+    }
+    newRadio.addEventListener("change", syncOrgModeFields);
+    existingRadio.addEventListener("change", syncOrgModeFields);
+
+    async function populateExistingOrgSelect() {
+      const select = document.getElementById("existing-org-select");
+      const issuers = await apiFetch("/issuers");
+      select.innerHTML = "";
+      for (const issuer of issuers) {
+        select.appendChild(el("option", { value: issuer.id, text: `${issuer.name} (${issuer.id.slice(0, 10)}…)` }));
+      }
+    }
+
+    document.getElementById("invite-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errorEl = document.getElementById("invite-error");
+      errorEl.textContent = "";
+      const email = document.getElementById("invite-email").value.trim();
+      if (!email) {
+        errorEl.textContent = "Enter the invitee's email.";
+        return;
+      }
+      const body = { email };
+      if (newRadio.checked) {
+        const name = document.getElementById("new-org-name").value.trim();
+        if (!name) {
+          errorEl.textContent = "Enter a name for the new organization.";
+          return;
+        }
+        body.new_org_name = name;
+      } else {
+        const orgId = document.getElementById("existing-org-select").value;
+        if (!orgId) {
+          errorEl.textContent = "Select an organization.";
+          return;
+        }
+        body.org_id = orgId;
+      }
+
+      try {
+        const result = await apiFetch("/admin/invites", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        document.getElementById("invite-result-summary").textContent =
+          `${email} → ${result.org_name}. This link expires ${result.expires_at} and can only be used once.`;
+        document.getElementById("invite-link").value = location.origin + result.invite_url;
+        document.getElementById("copy-status").textContent = "";
+        document.getElementById("invite-result-panel").style.display = "block";
+        document.getElementById("invite-email").value = "";
+      } catch (err) {
+        errorEl.textContent = err.message;
+      }
+    });
+
+    document.getElementById("copy-link-btn").addEventListener("click", async () => {
+      const linkInput = document.getElementById("invite-link");
+      linkInput.select();
+      try {
+        await navigator.clipboard.writeText(linkInput.value);
+        document.getElementById("copy-status").textContent = "Copied.";
+      } catch (err) {
+        document.getElementById("copy-status").textContent = "Couldn't copy automatically — it's selected, copy it manually.";
+      }
+    });
+
+    (async () => {
+      currentUser = await requireAuth(["platform_admin"]);
+      if (!currentUser) return;
+      await populateExistingOrgSelect();
+    })();
+  </script>

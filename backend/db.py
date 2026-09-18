@@ -158,6 +158,30 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detail_json TEXT,
     created_at TEXT NOT NULL
 );
+
+-- Invite-based org onboarding: a platform_admin creates the org (if new)
+-- and this row together, and hands the resulting link to the invitee
+-- out-of-band (no email-sending infra exists in this app -- see
+-- POST /admin/invites). role is stored per-row rather than always assumed
+-- 'org_user' so a future extension could invite other roles, even though
+-- today's only caller hardcodes 'org_user' (the one role that means
+-- "supplier"). Token is hashed the same way sessions.token_hash is
+-- (auth.hash_invite_token, sha256 of the raw token) -- only the hash is
+-- ever persisted. accepted_at/accepted_by_user_id double as the
+-- single-use guard: a second accept attempt on the same token 400s once
+-- accepted_at is set.
+CREATE TABLE IF NOT EXISTS org_invites (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES issuers(id),
+    email TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'org_user',
+    token_hash TEXT NOT NULL UNIQUE,
+    invited_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    accepted_at TEXT,
+    accepted_by_user_id TEXT REFERENCES users(id)
+);
 """
 
 # Split out from the main SCHEMA string so the migration test can create

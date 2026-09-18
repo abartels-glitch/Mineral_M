@@ -1,0 +1,385 @@
+/* ---- Shared, page-agnostic component library. Every page loads this
+   after tokens.css. If a rule only applies to one page's own arrangement,
+   it belongs in layout.css instead, not here. ---- */
+
+/* ============ Header / nav ============
+   Fixed min-height regardless of content — the previous build's header
+   wrapped onto two lines on pages with more nav+user content (the
+   dashboard, logged in) than others (e.g. scan.html, logged out), so
+   header height visibly changed page to page. Fix: no wrap; the nav row
+   scrolls horizontally instead of growing the header vertically. */
+.app-header {
+  min-height: var(--header-height);
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  padding: 0 var(--space-5);
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.app-header__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 0 0 auto;
+}
+.app-header__badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background: var(--color-accent);
+  color: var(--color-bg);
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+.app-header__brand-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  line-height: 1.25;
+}
+.app-header__name {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+.app-header__sub {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.02em;
+  color: var(--color-text-faint);
+  white-space: nowrap;
+}
+.app-header__nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  flex: 1 1 auto;
+  overflow-x: auto;
+  scrollbar-width: none;
+  height: 100%;
+}
+.app-header__nav::-webkit-scrollbar { display: none; }
+.app-header__nav-link {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-muted);
+  text-decoration: none;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+}
+.app-header__nav-link:hover { color: var(--color-text); }
+.app-header__nav-link.is-active {
+  color: var(--color-text);
+  border-bottom-color: var(--color-accent-strong);
+}
+.app-header__user {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.app-header__user-info { font-size: var(--text-xs); color: var(--color-text-muted); }
+.app-header__logout {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  text-decoration: none;
+}
+.app-header__logout:hover { color: var(--color-text); text-decoration: underline; }
+
+/* ============ Page shell ============ */
+main {
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  flex: 1;
+}
+main.main--narrow { max-width: 480px; justify-content: center; }
+
+.page-title {
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.panel {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-5);
+}
+.panel > h2, .panel > h3 {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+  margin-bottom: var(--space-2);
+}
+
+.muted { color: var(--color-text-muted); font-size: var(--text-sm); }
+.error { color: var(--status-rejected-fg); font-size: var(--text-sm); }
+.success { color: var(--status-verified-fg); font-size: var(--text-sm); }
+
+/* ============ Status chip ============
+   One component, four states, reused unmodified everywhere a status
+   appears (stat tiles, tables, workflow summary, passport detail, signing
+   key). Border reuses currentColor so each modifier only has to declare
+   a foreground once. Chip text is always the literal state word — pair
+   it with plain-text detail as sibling content, never fold detail into
+   the chip itself. */
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid currentColor;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  transition: background-color var(--duration-status-change) var(--ease-standard),
+    color var(--duration-status-change) var(--ease-standard);
+}
+.status-chip--verified { color: var(--status-verified-fg); background: var(--status-verified-bg); }
+.status-chip--pending { color: var(--status-pending-fg); background: var(--status-pending-bg); }
+.status-chip--flagged { color: var(--status-flagged-fg); background: var(--status-flagged-bg); }
+.status-chip--rejected { color: var(--status-rejected-fg); background: var(--status-rejected-bg); }
+
+/* Size variant only — same component, same 4 colors, larger type for the
+   one-per-page headline verdict (passport detail, issuance gate). */
+.status-chip--lg { height: 32px; padding: 0 var(--space-3); font-size: var(--text-lg); }
+
+/* ============ Buttons ============
+   Three variants, no per-page one-off styles. Never more than one
+   .btn--primary visible on screen at once. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  height: 36px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+  transition: background-color 0.12s var(--ease-standard), border-color 0.12s var(--ease-standard),
+    color 0.12s var(--ease-standard);
+}
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn--primary { background: var(--color-accent); border-color: var(--color-accent); color: #fff; }
+.btn--primary:hover:not(:disabled) { background: var(--color-accent-strong); border-color: var(--color-accent-strong); }
+
+.btn--secondary { background: transparent; border-color: var(--color-border-strong); color: var(--color-text); }
+.btn--secondary:hover:not(:disabled) { border-color: var(--color-text-muted); }
+
+.btn--tertiary {
+  background: transparent;
+  border-color: transparent;
+  color: var(--color-text-muted);
+  height: auto;
+  padding: 0;
+  text-decoration: none;
+}
+.btn--tertiary:hover:not(:disabled) { color: var(--color-text); text-decoration: underline; }
+
+.btn--icon {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border-color: var(--color-border-strong);
+  color: var(--color-text-muted);
+}
+.btn--icon:hover:not(:disabled) { color: var(--color-text); border-color: var(--color-text-muted); }
+
+.btn--sm { height: 28px; padding: 0 var(--space-3); font-size: var(--text-xs); }
+.btn--lg { height: 48px; padding: 0 var(--space-5); font-size: var(--text-base); }
+.btn--block { width: 100%; }
+
+/* ============ Stat tile / summary strip ============ */
+.stat-strip {
+  display: flex;
+  flex-wrap: wrap;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  overflow: hidden;
+}
+.stat-strip__tile {
+  flex: 1 1 120px;
+  padding: var(--space-4) var(--space-5);
+  border-right: 1px solid var(--color-border);
+}
+.stat-strip__tile:last-child { border-right: none; }
+.stat-strip__value {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+  line-height: 1.1;
+}
+.stat-strip__value--verified { color: var(--status-verified-fg); }
+.stat-strip__value--pending { color: var(--status-pending-fg); }
+.stat-strip__value--flagged { color: var(--status-flagged-fg); }
+.stat-strip__value--rejected { color: var(--status-rejected-fg); }
+.stat-strip__label {
+  display: block;
+  margin-top: 4px;
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+/* ============ Data table ============
+   Dense rows (~40px), real <table> markup, mono for identifiers, status
+   column right-aligned. No zebra-striping. */
+.data-table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
+.data-table th {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-border-strong);
+  white-space: nowrap;
+}
+.data-table th[data-sortable] { cursor: pointer; user-select: none; }
+.data-table th[data-sortable]::after { content: "↕"; margin-left: 4px; color: var(--color-text-faint); font-size: 0.7em; }
+.data-table td {
+  padding: 10px var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: middle;
+}
+.data-table tr:last-child td { border-bottom: none; }
+.data-table .mono { font-family: var(--font-mono); }
+.data-table td.data-table__status { text-align: right; white-space: nowrap; }
+.data-table tbody tr.is-clickable { cursor: pointer; }
+.data-table tbody tr.is-clickable:hover { background: var(--color-surface-raised); }
+.data-table tbody tr.is-selected { background: var(--color-surface-raised); }
+.data-table tbody tr.row--flagged td { background: var(--status-flagged-bg); }
+.data-table tbody tr.row--rejected td { background: var(--status-rejected-bg); }
+.data-table td input[type="text"],
+.data-table td select {
+  height: 28px;
+  margin-bottom: 0;
+  font-size: var(--text-xs);
+}
+
+/* ============ Forms ============
+   Labels above fields (never placeholder-only). Bare-element styling so
+   existing label/input markup across pages needs no wrapper change. */
+label { display: block; font-size: var(--text-xs); font-weight: var(--weight-medium); color: var(--color-text-muted); margin-bottom: 6px; }
+input[type="text"],
+input[type="password"],
+input[type="number"],
+input[type="email"],
+select,
+textarea {
+  width: 100%;
+  height: 36px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  margin-bottom: var(--space-4);
+}
+textarea { height: auto; min-height: 72px; padding: var(--space-2) var(--space-3); resize: vertical; }
+input::placeholder, textarea::placeholder { color: var(--color-text-faint); }
+input:disabled, select:disabled, textarea:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Mono — every field/value the user needs to verify character-by-character
+   (IDs, UIIs, hashes, lot/heat numbers, timestamps, signatures, filenames). */
+.mono, input.mono, dd.mono, td.mono, span.mono { font-family: var(--font-mono); }
+
+.field-error { font-size: var(--text-xs); color: var(--status-rejected-fg); margin: -8px 0 var(--space-3); }
+
+/* ============ Dropzone ============ */
+.dropzone {
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-6) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  text-align: center;
+  cursor: pointer;
+  color: var(--color-text-muted);
+}
+.dropzone:hover, .dropzone:focus-visible { border-color: var(--color-accent); color: var(--color-text); }
+.dropzone.is-dragover { border-color: var(--color-accent); background: var(--status-verified-bg); }
+.dropzone.is-busy { cursor: progress; opacity: 0.7; }
+.dropzone__icon { font-size: 1.5rem; color: var(--color-text-faint); }
+.dropzone.is-dragover .dropzone__icon, .dropzone:hover .dropzone__icon { color: var(--color-accent); }
+.dropzone.is-busy .dropzone__icon { animation: dropzone-spin 1s linear infinite; }
+@keyframes dropzone-spin { to { transform: rotate(360deg); } }
+.dropzone__text { font-size: var(--text-base); font-weight: var(--weight-medium); color: var(--color-text); }
+.dropzone__hint { font-size: var(--text-xs); color: var(--color-text-faint); }
+.dropzone__status { margin-top: var(--space-3); font-size: var(--text-sm); color: var(--status-verified-fg); }
+
+/* ============ Empty / error state block ============
+   Same shape for both — centered, sparse, procedural copy. Error states
+   additionally pull an accent line + icon color from the status palette;
+   empty states stay neutral. */
+.state-block {
+  padding: var(--space-7) var(--space-5);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 440px;
+  margin: 0 auto;
+}
+.state-block__icon { font-size: 1.75rem; color: var(--color-text-faint); }
+.state-block__title { font-size: var(--text-lg); font-weight: var(--weight-semibold); color: var(--color-text); }
+.state-block__body { font-size: var(--text-sm); color: var(--color-text-muted); line-height: 1.55; }
+.state-block__action { margin-top: var(--space-2); }
+.state-block--error { border-left: 2px solid var(--status-rejected-fg); }
+.state-block--error .state-block__icon { color: var(--status-rejected-fg); }
+.state-block--attention { border-left: 2px solid var(--status-flagged-fg); }
+.state-block--attention .state-block__icon { color: var(--status-flagged-fg); }
+
+/* ============ Callout ============
+   A consequence that must be legible before the user commits to an
+   action (e.g. signing-key regeneration) — not plain muted prose. */
+.callout {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  border: 1px solid var(--status-flagged-fg);
+  background: var(--status-flagged-bg);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--color-text);
+}
+.callout--rejected { border-color: var(--status-rejected-fg); background: var(--status-rejected-bg); }
+.callout__icon { flex-shrink: 0; line-height: 1.5; }
+.callout__body { flex: 1; line-height: 1.55; }
+.callout__body strong { color: var(--color-text); }
