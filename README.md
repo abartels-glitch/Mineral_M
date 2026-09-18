@@ -22,7 +22,7 @@ with a real design partner before a real pilot.
 | **Key custody** | Client-side, org-controlled: each org generates its own Ed25519 keypair in-browser (Web Crypto, non-extractable private key, IndexedDB-persisted) — the platform never sees or stores a private key. Keys are versioned (`issuer_keys`, one row per key with a validity window) so rotation doesn't retroactively invalidate credentials signed under a prior key; revocation is retroactive (flags every credential that key ever signed). First-key registration is `platform_admin`-witnessed (same checkpoint as org onboarding); rotation after that is self-service by the org's own account. **Known gap:** registration only proves the request came from an authenticated org session (role/org_id check + a password step-up re-auth) — not real-world identity. A compromised org account can still register an attacker-controlled key. | Move to hardware-backed custody (WebAuthn/FIDO2 security keys or an org-side HSM) and add real identity verification (notarization/KYC) behind first-key registration before handling real supplier trust relationships |
 | **Document scope** | One document type: certificate of conformance / MTR. A certificate can cover one heat/melt (the common case) or several (a consolidated multi-heat certificate) — each heat is extracted, reviewed, and can become its own credential independently. Tightened after testing against `rio_grande_mtr_complex.pdf` (see below): single-heat is the working regression bar, multi-heat is the stretch target. | Add document *types* (not just heat counts) once the first one is proven against a real sample |
 | **Segregation enforcement** | Self-reported, but with a floor: `segregation_attested` (bool) + `segregation_attested_by` (named person) + `segregation_note` (control description). No third-party evidence yet. | Add evidence upload (photos, process logs) and eventually third-party audit |
-| **Materials scope** | Compliance engine only checks the actual DFARS rare-earth scope: samarium-cobalt magnets, NdFeB magnets, tantalum, tungsten. Anything else yields `insufficient_data`, not a silent pass. | Don't let product language ("motors, batteries, ESCs") outrun this without extending the engine first |
+| **Materials scope** | Compliance engine only checks the actual DFARS rare-earth scope: samarium-cobalt magnets, NdFeB magnets, tantalum, tungsten. Anything else yields `insufficient_data`, not a silent pass. Per-org, not a single hardcoded list — see "Onboarding a new design partner" below. | Don't let product language ("motors, batteries, ESCs") outrun this without extending the engine first |
 
 ### Synthetic design partner: Rio Grande Magnetics (fictional)
 
@@ -39,6 +39,63 @@ used only to make the schema and demo concrete — not a real company:
 
 Replace this with a real design partner's real document before treating
 any output as more than a demo.
+
+### Onboarding a new design partner
+
+The parts of extraction/compliance that genuinely vary per design partner
+(as opposed to being fixed by the certificate-of-conformance/MTR document
+type itself — see the caveat below) are pulled out of Python and into
+`config/orgs/<slug>.json`, keyed off the org's `issuers.name` lowercased
+with everything but letters/digits stripped (`"Rio Grande Magnetics"` →
+`riograndemagnetics.json`; `org_config.org_slug()` does the same
+normalization at lookup time — there's no separate slug column). An org
+with no config file on disk gets `org_config.DEFAULT_CONFIG` (today,
+identical in content to Rio Grande's own file), so nothing breaks for an
+org that hasn't been onboarded with a file yet.
+
+To onboard a new design partner, add `config/orgs/<slug>.json` with:
+
+```json
+{
+  "org_name": "Exact name as it appears in the issuers table",
+  "document_types": ["mtr_coc"],
+  "heat_id_label_hint": "Whatever this supplier's own certs call the heat/batch/lot number",
+  "materials_scope": ["keyword", "keyword", "..."]
+}
+```
+
+- **`document_types`** — accepted values for the upload endpoint's
+  `document_type` field; `POST /documents/upload` now 400s with a message
+  naming the org if it's given anything else (`main.py`'s `upload_document`).
+- **`heat_id_label_hint`** — fed to the LLM extraction prompt as the
+  description of the `heat_id` field (`llm_extractor._build_heat_schema`) —
+  the one part of the extraction schema that's genuinely about this org's
+  own document wording rather than the document type in general.
+- **`materials_scope`** — substring keywords checked against each
+  credential's `material_type` at passport-compile time
+  (`passport._material_in_scope`), resolved **per issuing org** — a
+  composite credential combining sources from two different orgs checks
+  each source against its own issuer's scope, not one global list.
+
+No code change in `llm_extractor.py` or `passport.py` is required for this
+— see `backend/tests/test_org_config.py`, which proves the same claim with
+a second, structurally unrelated fictional org ("Acme Tantalum Components")
+whose materials scope shares no keywords with Rio Grande's.
+
+**What's deliberately NOT config-driven**: the extracted field *names*
+themselves (`heat_id`, `alloy_composition`, `test_results`, `mass_kg`,
+sub-lot `sublot_id`/`blend_pct`/`origin_country`/`origin_confidence`) stay
+fixed Python-level schema keys. They're load-bearing several layers past
+extraction — `main.py`'s ingestion code, the `document_heats`/`heat_sublots`
+SQL columns, and the frontend correction UI
+(`index.html`'s `HEAT_CORRECTABLE_FIELDS`/`ORIGIN_FIELD_MARKERS`) all
+read/write these exact keys — so a config file that renamed one would
+silently break the pipeline downstream with no error at the config-loading
+boundary. These names describe the certificate-of-conformance/MTR document
+*type* (shared by any org submitting one), not any one org's variation on
+it — genuinely adding a *different* document type (not just different
+terminology for the same one) is BUILD_SPEC section 2's own larger,
+later item, not something this config format takes on.
 
 ## Auth
 

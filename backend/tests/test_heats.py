@@ -149,7 +149,7 @@ def test_upload_with_mocked_multi_heat_flagged_sublot(client, conn, monkeypatch)
     evaluation) against a controlled multi-heat extraction result,
     without needing a live LLM call."""
 
-    def fake_extract_structured(raw_text):
+    def fake_extract_structured(raw_text, org_cfg=None):
         return {
             "certificate_id": "RGM-CERT-2026-0498",
             "supplier_id": "Rio Grande Magnetics, LLC",
@@ -222,7 +222,7 @@ def test_upload_records_extraction_degraded_audit_entry_with_category(client, co
     permanent-config failures this week" must be a direct filter on
     category, not a matter of cross-referencing exception class names."""
 
-    def fake_extract_structured(raw_text):
+    def fake_extract_structured(raw_text, org_cfg=None):
         return {
             "certificate_id": None,
             "supplier_id": "Rio Grande Magnetics, LLC",
@@ -417,7 +417,7 @@ def test_review_preserves_heat_level_extraction_flag_when_unaddressed(client, co
     monkeypatch.setattr(
         llm_extractor,
         "extract_structured",
-        lambda raw_text: {
+        lambda raw_text, org_cfg=None: {
             "certificate_id": "CERT-1",
             "supplier_id": "Rio Grande Magnetics, LLC",
             "signatures": [],
@@ -454,7 +454,7 @@ def test_review_does_not_reopen_a_flag_already_resolved_via_correct(client, conn
     monkeypatch.setattr(
         llm_extractor,
         "extract_structured",
-        lambda raw_text: {
+        lambda raw_text, org_cfg=None: {
             "certificate_id": "CERT-1",
             "supplier_id": "Rio Grande Magnetics, LLC",
             "signatures": [],
@@ -606,7 +606,7 @@ def test_correcting_the_only_sublot_also_resolves_the_llms_own_heat_level_origin
     and the issuance gate permanently refused the heat, even though the
     actual compliance problem was genuinely fixed."""
 
-    def fake_extract_structured(raw_text):
+    def fake_extract_structured(raw_text, org_cfg=None):
         return {
             "certificate_id": "RGM-CERT-DEADEND",
             "supplier_id": "Rio Grande Magnetics, LLC",

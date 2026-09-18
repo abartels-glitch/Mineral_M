@@ -40,6 +40,7 @@ import os
 import anthropic
 
 import extractor
+import org_config
 import review_flags
 
 logger = logging.getLogger(__name__)
@@ -111,103 +112,116 @@ FLAG_SCHEMA = {
     "required": ["issue_type", "field_name", "human_readable_reason"],
 }
 
-HEAT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "heat_id": {
-            "type": ["string", "null"],
-            "description": "Normalize label variants: 'Heat No.', 'Melt Ref.', etc. all mean the same thing.",
-        },
-        "alloy_composition": {
-            "type": ["object", "null"],
-            "additionalProperties": {"type": "number"},
-            "description": 'Element symbol -> weight percent, e.g. {"Nd": 29.5, "Fe": 68.2, "B": 1.0}. Null if not present in the text.',
-        },
-        "test_results": {
-            "type": ["object", "null"],
-            "additionalProperties": {
-                "type": "object",
-                "properties": {
-                    "value": {"type": ["string", "number", "null"]},
-                    "result": {"type": ["string", "null"], "enum": ["pass", "fail", "marginal", None]},
-                },
-                "required": ["value", "result"],
-            },
-            "description": "Test name -> {value, result}. Null if not present.",
-        },
-        "nonconformance_refs": {"type": "array", "items": {"type": "string"}},
-        "feedstock_sublots": {"type": "array", "items": SUBLOT_SCHEMA},
-        "segregation_attested": {"type": "boolean"},
-        "segregation_note": {"type": ["string", "null"]},
-        "mass_kg": {"type": ["number", "null"]},
-        "confidence": {
-            "type": "number",
-            "description": (
-                "0.0-1.0 confidence that this heat's fields were read correctly from clear text — "
-                "NOT a judgment of whether the extracted facts are compliant or convenient. A heat "
-                "with a plainly-stated covered-country origin should score just as high as one with "
-                "a plainly-stated domestic origin. Only lower this for genuine textual ambiguity: "
-                "hedged language, contradictions, or missing data."
-            ),
-        },
-        "flags": {
-            "type": "array",
-            "items": FLAG_SCHEMA,
-            "description": (
-                "One entry per distinct issue you notice in this heat's data: a missing field, "
-                "hedged/ambiguous text, internally inconsistent values, a covered country "
-                f"({BANNED_ORIGIN_COUNTRIES_HINT}) appearing as an origin anywhere in the sub-lot "
-                "table, or a sub-lot with unconfirmed/low-confidence origin data. Empty array if "
-                "the heat's data is clean. Don't fold multiple distinct issues into one entry, and "
-                "don't let a compliance-sensitive fact (e.g. a covered-country origin) change how "
-                "confident you are in the data — that's a separate signal, tracked here, not in "
-                "`confidence`."
-            ),
-        },
-    },
-    "required": [
-        "heat_id",
-        "alloy_composition",
-        "test_results",
-        "nonconformance_refs",
-        "feedstock_sublots",
-        "segregation_attested",
-        "segregation_note",
-        "mass_kg",
-        "confidence",
-        "flags",
-    ],
-}
-
-TOOL = {
-    "name": "record_mtr_extraction",
-    "description": (
-        "Record structured data extracted from a certificate of conformance / mill test report, "
-        "which may cover one heat or several (a consolidated multi-heat certificate)."
-    ),
-    "input_schema": {
+def _build_heat_schema(heat_id_label_hint: str) -> dict:
+    """heat_id's `description` is the one part of this schema that's
+    genuinely org-specific (which label variants a given design partner's
+    certificates actually use) rather than a fixed property of the
+    "certificate of conformance / MTR" document type itself — see
+    org_config.py's module docstring for why every other field name/shape
+    here stays fixed Python code instead of also moving to org config."""
+    return {
         "type": "object",
         "properties": {
-            "certificate_id": {"type": ["string", "null"]},
-            "supplier_id": {"type": ["string", "null"]},
-            "signatures": {
-                "type": "array",
-                "items": {
+            "heat_id": {
+                "type": ["string", "null"],
+                "description": heat_id_label_hint,
+            },
+            "alloy_composition": {
+                "type": ["object", "null"],
+                "additionalProperties": {"type": "number"},
+                "description": 'Element symbol -> weight percent, e.g. {"Nd": 29.5, "Fe": 68.2, "B": 1.0}. Null if not present in the text.',
+            },
+            "test_results": {
+                "type": ["object", "null"],
+                "additionalProperties": {
                     "type": "object",
                     "properties": {
-                        "name": {"type": ["string", "null"]},
-                        "title": {"type": ["string", "null"]},
-                        "org": {"type": ["string", "null"]},
-                        "role": {"type": ["string", "null"], "enum": ["issuer", "witness", None]},
+                        "value": {"type": ["string", "number", "null"]},
+                        "result": {"type": ["string", "null"], "enum": ["pass", "fail", "marginal", None]},
                     },
-                    "required": ["name", "title", "org", "role"],
+                    "required": ["value", "result"],
+                },
+                "description": "Test name -> {value, result}. Null if not present.",
+            },
+            "nonconformance_refs": {"type": "array", "items": {"type": "string"}},
+            "feedstock_sublots": {"type": "array", "items": SUBLOT_SCHEMA},
+            "segregation_attested": {"type": "boolean"},
+            "segregation_note": {"type": ["string", "null"]},
+            "mass_kg": {"type": ["number", "null"]},
+            "confidence": {
+                "type": "number",
+                "description": (
+                    "0.0-1.0 confidence that this heat's fields were read correctly from clear text — "
+                    "NOT a judgment of whether the extracted facts are compliant or convenient. A heat "
+                    "with a plainly-stated covered-country origin should score just as high as one with "
+                    "a plainly-stated domestic origin. Only lower this for genuine textual ambiguity: "
+                    "hedged language, contradictions, or missing data."
+                ),
+            },
+            "flags": {
+                "type": "array",
+                "items": FLAG_SCHEMA,
+                "description": (
+                    "One entry per distinct issue you notice in this heat's data: a missing field, "
+                    "hedged/ambiguous text, internally inconsistent values, a covered country "
+                    f"({BANNED_ORIGIN_COUNTRIES_HINT}) appearing as an origin anywhere in the sub-lot "
+                    "table, or a sub-lot with unconfirmed/low-confidence origin data. Empty array if "
+                    "the heat's data is clean. Don't fold multiple distinct issues into one entry, and "
+                    "don't let a compliance-sensitive fact (e.g. a covered-country origin) change how "
+                    "confident you are in the data — that's a separate signal, tracked here, not in "
+                    "`confidence`."
+                ),
+            },
+        },
+        "required": [
+            "heat_id",
+            "alloy_composition",
+            "test_results",
+            "nonconformance_refs",
+            "feedstock_sublots",
+            "segregation_attested",
+            "segregation_note",
+            "mass_kg",
+            "confidence",
+            "flags",
+        ],
+    }
+
+
+def _build_tool(org_cfg: dict) -> dict:
+    return {
+        "name": "record_mtr_extraction",
+        "description": (
+            "Record structured data extracted from a certificate of conformance / mill test report, "
+            "which may cover one heat or several (a consolidated multi-heat certificate)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "certificate_id": {"type": ["string", "null"]},
+                "supplier_id": {"type": ["string", "null"]},
+                "signatures": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": ["string", "null"]},
+                            "title": {"type": ["string", "null"]},
+                            "org": {"type": ["string", "null"]},
+                            "role": {"type": ["string", "null"], "enum": ["issuer", "witness", None]},
+                        },
+                        "required": ["name", "title", "org", "role"],
+                    },
+                },
+                "heats": {
+                    "type": "array",
+                    "items": _build_heat_schema(org_cfg["heat_id_label_hint"]),
+                    "minItems": 1,
                 },
             },
-            "heats": {"type": "array", "items": HEAT_SCHEMA, "minItems": 1},
+            "required": ["certificate_id", "supplier_id", "signatures", "heats"],
         },
-        "required": ["certificate_id", "supplier_id", "signatures", "heats"],
-    },
-}
+    }
 
 SYSTEM_PROMPT = (
     "You extract structured data from a certificate of conformance / mill test report (MTR) "
@@ -261,19 +275,20 @@ def _classify_failure(exc: Exception) -> str:
     return "malformed"
 
 
-def _call_llm(raw_text: str) -> dict:
+def _call_llm(raw_text: str, org_cfg: dict) -> dict:
     # max_retries/timeout made explicit rather than relying on the SDK's
     # defaults unstated — both already matched the SDK's own defaults at
     # the time this was written, but pinning them here is a deliberate,
     # documented choice rather than an accident of whatever the SDK
     # happens to default to on a future version bump.
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], max_retries=2, timeout=60.0)
+    tool = _build_tool(org_cfg)
     response = client.messages.create(
         model=MODEL,
         max_tokens=4096,
         system=SYSTEM_PROMPT,
-        tools=[TOOL],
-        tool_choice={"type": "tool", "name": TOOL["name"]},
+        tools=[tool],
+        tool_choice={"type": "tool", "name": tool["name"]},
         messages=[{"role": "user", "content": raw_text}],
     )
     usage = response.usage
@@ -370,7 +385,7 @@ def _regex_fallback(raw_text: str, failure: dict | None = None) -> dict:
     return result
 
 
-def extract_structured(raw_text: str) -> dict:
+def extract_structured(raw_text: str, org_cfg: dict | None = None) -> dict:
     """Returns {certificate_id, supplier_id, signatures, heats: [...]} —
     each heat dict carries a `source` key ('llm' on a successful model
     call, 'regex' when it fell back) so callers can record which path
@@ -379,9 +394,17 @@ def extract_structured(raw_text: str) -> dict:
     field_name/human_readable_reason entries — severity is derived here,
     not trusted to the model, so it's always consistent with issue_type.
 
+    org_cfg is the per-org config dict from org_config.py (its
+    heat_id_label_hint drives the one org-specific piece of the extraction
+    schema — see _build_heat_schema). Defaults to org_config.DEFAULT_CONFIG
+    when omitted, so every existing caller/test that predates per-org config
+    keeps behaving exactly as before.
+
     A genuine API failure (as opposed to no key being configured at all)
     additionally carries a top-level `extraction_failure` key — see
     _regex_fallback and the module docstring's failure taxonomy."""
+    if org_cfg is None:
+        org_cfg = org_config.DEFAULT_CONFIG
     if not os.environ.get("ANTHROPIC_API_KEY"):
         return _regex_fallback(raw_text)
 
@@ -389,7 +412,7 @@ def extract_structured(raw_text: str) -> dict:
     category = "malformed"
     for attempt in range(MAX_MALFORMED_RESPONSE_ATTEMPTS):
         try:
-            result = _call_llm(raw_text)
+            result = _call_llm(raw_text, org_cfg)
             for heat in result["heats"]:
                 heat["source"] = "llm"
                 raw_flags = heat.pop("flags", []) or []

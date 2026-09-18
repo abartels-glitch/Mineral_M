@@ -96,7 +96,7 @@ def test_covered_country_fixture_triggers_compliance_violation(client, conn, mon
     flag it as compliance_violation regardless of what the (mocked)
     LLM's own flags list says, same as test_heats.py's H-2 case."""
 
-    def fake_extract_structured(raw_text):
+    def fake_extract_structured(raw_text, org_cfg=None):
         assert "Country of Origin: China" in raw_text
         return {
             "certificate_id": "RGM-CERT-2026-0505",
@@ -153,7 +153,7 @@ def test_different_lab_layout_fixture_extracts_cleanly(client, conn, monkeypatch
     document with unambiguous content should extract clean and
     unflagged."""
 
-    def fake_extract_structured(raw_text):
+    def fake_extract_structured(raw_text, org_cfg=None):
         assert "SOUTHWEST METALLURGICAL TESTING LABORATORIES" in raw_text
         assert "Sample Reference: RGM-NDFEB-2026-0503" in raw_text
         return {
@@ -204,7 +204,7 @@ def test_inconsistent_composition_fixture_flags_inconsistent_data(client, conn, 
     wt%, B=1.1, Dy...1.2 percent') — internally messy in a way the
     system prompt's inconsistent_data category exists for."""
 
-    def fake_extract_structured(raw_text):
+    def fake_extract_structured(raw_text, org_cfg=None):
         assert "Nd 29.4%, Fe: 68.3 wt%, B=1.1, Dy...1.2 percent" in raw_text
         return {
             "certificate_id": "RGM-CERT-2026-0502",
@@ -259,7 +259,7 @@ def test_missing_heat_number_fixture_flags_missing_field(client, conn, monkeypat
     """rio_grande_mtr_missing_heat_number.pdf has no heat/melt/lot
     number stated anywhere in the document."""
 
-    def fake_extract_structured(raw_text):
+    def fake_extract_structured(raw_text, org_cfg=None):
         assert "Heat No" not in raw_text
         return {
             "certificate_id": "RGM-CERT-2026-0501",
@@ -325,7 +325,7 @@ def test_unconfirmed_origin_fixture_flags_low_confidence(client, conn, monkeypat
     opposite case: plainly stated, high confidence, still flagged, but
     for compliance_violation instead)."""
 
-    def fake_extract_structured(raw_text):
+    def fake_extract_structured(raw_text, org_cfg=None):
         assert "unconfirmed" in raw_text
         assert "country of origin\n  not yet verified" in raw_text.lower()
         return {
@@ -386,7 +386,7 @@ def test_sample_fixture_extracts_cleanly_as_the_happy_path_baseline(client, conn
     path stays happy: zero flags, not flagged for review, every field
     populated exactly as stated."""
 
-    def fake_extract_structured(raw_text):
+    def fake_extract_structured(raw_text, org_cfg=None):
         assert "Heat No.: RGM-NDFEB-2026-0412" in raw_text
         assert "Country of Origin: United States" in raw_text
         return {
@@ -463,7 +463,7 @@ def test_complex_fixture_extracts_three_independent_heats_with_correct_sublots(c
     H-2 case) are confirmed too, since they're part of the same real
     document, but that's not the only thing being checked here."""
 
-    def fake_extract_structured(raw_text):
+    def fake_extract_structured(raw_text, org_cfg=None):
         assert "CONSOLIDATED - MULTI-HEAT" in raw_text
         assert "Melt Ref.: RGM-NDFEB-2026-0491" in raw_text
         assert "Melt Ref.: RGM-NDFEB-2026-0492" in raw_text

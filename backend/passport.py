@@ -10,6 +10,7 @@ import hashlib
 import json
 import sqlite3
 
+import org_config
 import storage
 from crypto_utils import credential_signable_payload, verify_signature
 
@@ -69,21 +70,17 @@ def is_banned_origin(origin_country: str) -> bool:
 
 
 # DFARS rare-earth scope this compliance engine actually checks — not the
-# broader "motors, batteries, ESCs" language from the pitch deck.
-COVERED_MATERIAL_KEYWORDS = (
-    "samarium-cobalt",
-    "samarium cobalt",
-    "smco",
-    "ndfeb",
-    "neodymium",
-    "tantalum",
-    "tungsten",
-)
+# broader "motors, batteries, ESCs" language from the pitch deck. Was a
+# hardcoded module constant here; now per-org (org_config.py's
+# "materials_scope"), keyed off whichever org issued the credential being
+# evaluated (see _evaluate_node) — see org_config.py's module docstring for
+# why materials scope specifically was safe to externalize with no
+# structural coupling risk, unlike the extraction schema's field names.
 
 
-def _material_in_scope(material_type: str) -> bool:
+def _material_in_scope(material_type: str, materials_scope: list[str]) -> bool:
     lowered = material_type.lower()
-    return any(keyword in lowered for keyword in COVERED_MATERIAL_KEYWORDS)
+    return any(keyword in lowered for keyword in materials_scope)
 
 
 def _evaluate_node(conn: sqlite3.Connection, credential_id: str) -> tuple[dict, list[str]]:
@@ -118,6 +115,10 @@ def _evaluate_node(conn: sqlite3.Connection, credential_id: str) -> tuple[dict, 
     sources = json.loads(row["sources_json"])
     material_type = subject.get("material_type")
     origin_country = subject.get("origin_country")
+    # Materials scope is the issuing org's, not a single global list — a
+    # composite credential can combine sources from different orgs, and
+    # each node is checked against whichever org actually issued it.
+    org_cfg = org_config.load_config_for_issuer(conn, row["issuer_id"])
 
     reasons: list[str] = []
     node_status = "pass"
@@ -212,10 +213,14 @@ def _evaluate_node(conn: sqlite3.Connection, credential_id: str) -> tuple[dict, 
     if not material_type:
         reasons.append("material_type not recorded")
         downgrade("insufficient_data")
-    elif not _material_in_scope(material_type):
+    elif not _material_in_scope(material_type, org_cfg["materials_scope"]):
+        # Generated from the same list actually checked above, not a
+        # separately hardcoded display string — the two can't drift the
+        # way the old module-constant-plus-hardcoded-string pair could.
+        scope_display = ", ".join(org_cfg["materials_scope"])
         reasons.append(
             f"material_type '{material_type}' is outside the DFARS rare-earth scope "
-            "this engine checks (samarium-cobalt, NdFeB, tantalum, tungsten)"
+            f"this engine checks for {org_cfg['org_name']} ({scope_display})"
         )
         downgrade("insufficient_data")
 

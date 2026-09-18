@@ -78,7 +78,7 @@ def _login_org_user(client, conn):
 
 
 def _upload_mocked(client, monkeypatch, heats):
-    def fake_extract_structured(raw_text):
+    def fake_extract_structured(raw_text, org_cfg=None):
         return {"certificate_id": "CERT-1", "supplier_id": "Rio Grande Magnetics, LLC", "signatures": [], "heats": heats}
 
     monkeypatch.setattr(llm_extractor, "extract_structured", fake_extract_structured)

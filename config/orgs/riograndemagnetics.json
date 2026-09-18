@@ -1,0 +1,14 @@
+{
+  "org_name": "Rio Grande Magnetics",
+  "document_types": ["mtr_coc"],
+  "heat_id_label_hint": "Normalize label variants: 'Heat No.', 'Melt Ref.', etc. all mean the same thing.",
+  "materials_scope": [
+    "samarium-cobalt",
+    "samarium cobalt",
+    "smco",
+    "ndfeb",
+    "neodymium",
+    "tantalum",
+    "tungsten"
+  ]
+}

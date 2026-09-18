@@ -89,7 +89,7 @@ def _upload(client, filename="mtr.txt", text=MTR_TEXT):
 
 
 def _upload_mocked(client, monkeypatch, heats):
-    def fake_extract_structured(raw_text):
+    def fake_extract_structured(raw_text, org_cfg=None):
         return {"certificate_id": "CERT-1", "supplier_id": "Rio Grande Magnetics, LLC", "signatures": [], "heats": heats}
 
     monkeypatch.setattr(llm_extractor, "extract_structured", fake_extract_structured)
@@ -268,7 +268,7 @@ def test_correct_heat_field_resolves_matching_flag(client, conn, monkeypatch):
 def test_correct_heat_field_rejects_unknown_field(client, conn):
     # nonconformance_refs (not alloy_composition/test_results, which are
     # correctable -- see test_corrections_object_fields.py) stays off the
-    # allowlist: it's a list of strings (llm_extractor.HEAT_SCHEMA), not a
+    # allowlist: it's a list of strings (llm_extractor._build_heat_schema()), not a
     # scalar or the flat/one-level-nested dict shapes this pass built
     # editors for. /review's full-replace form remains the only way to
     # change it until a list-shaped editor exists.

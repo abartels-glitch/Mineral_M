@@ -29,6 +29,11 @@ import crypto_utils
 import storage
 from db import LEGACY_KEY_ID, get_connection, init_db
 
+# Synthetic-only: "Rio Grande Magnetics" and these credentials are a fictional
+# design partner (see README.md), not a real company. Do not reuse this email/
+# password pattern, or grant them access to anything beyond this seeded demo
+# database, once a real first design partner is onboarded — issue that org
+# real, unique credentials through the normal /admin/users flow instead.
 ISSUER_NAME = "Rio Grande Magnetics"
 ORG_USER_EMAIL = "maria@riograndemagnetics.example"
 ORG_USER_PASSWORD = "riograndemagnetics-dev"
